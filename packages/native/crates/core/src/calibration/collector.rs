@@ -1,0 +1,240 @@
+//! Calibration sample collection and outlier rejection (ADR-0006).
+
+use super::fit::{fit, CalibSample, CalibrationError};
+use super::model::CalibrationModel;
+use crate::frame::GazeFrame;
+use crate::math::Vec2;
+
+/// Samples further than this many MADs from the per-target median are dropped.
+const MAD_REJECT: f64 = 3.0;
+/// Floor on the MAD so a very consistent target does not reject everything on
+/// floating-point noise.
+const MAD_FLOOR: f64 = 1e-4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleRejection {
+    Accepted,
+    /// A blink was in progress; the eyelid corrupts the gaze estimate.
+    Blinking,
+    /// Tracking confidence too low.
+    LowQuality,
+    /// No face in the frame.
+    NoFace,
+    UnknownTarget,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Collector {
+    targets: Vec<Vec2>,
+    samples: Vec<CalibSample>,
+    rejected: usize,
+}
+
+impl Collector {
+    pub fn new(targets: Vec<Vec2>) -> Self {
+        Self { targets, samples: Vec::new(), rejected: 0 }
+    }
+
+    pub fn targets(&self) -> &[Vec2] {
+        &self.targets
+    }
+
+    pub fn accepted_count(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn rejected_count(&self) -> usize {
+        self.rejected
+    }
+
+    pub fn count_for(&self, target_index: usize) -> usize {
+        self.samples.iter().filter(|s| s.target_index == target_index).count()
+    }
+
+    /// Offer one frame as a sample for `target_index`.
+    pub fn add(
+        &mut self,
+        target_index: usize,
+        frame: GazeFrame,
+        blinking: bool,
+        min_quality: f64,
+    ) -> SampleRejection {
+        let Some(&target) = self.targets.get(target_index) else {
+            return SampleRejection::UnknownTarget;
+        };
+        // Rejection order matters only for the reason reported back to the UI.
+        let reason = if !frame.ok {
+            SampleRejection::NoFace
+        } else if blinking {
+            SampleRejection::Blinking
+        } else if frame.quality < min_quality {
+            SampleRejection::LowQuality
+        } else {
+            SampleRejection::Accepted
+        };
+
+        if reason != SampleRejection::Accepted {
+            self.rejected += 1;
+            return reason;
+        }
+
+        self.samples.push(CalibSample { frame, target, target_index });
+        SampleRejection::Accepted
+    }
+
+    /// Drop per-target outliers by median absolute deviation on the gaze
+    /// features. A user glancing away mid-target produces samples that would
+    /// otherwise drag the whole fit.
+    fn filtered_samples(&self) -> Vec<CalibSample> {
+        let mut out = Vec::with_capacity(self.samples.len());
+
+        for (idx, _) in self.targets.iter().enumerate() {
+            let group: Vec<&CalibSample> =
+                self.samples.iter().filter(|s| s.target_index == idx).collect();
+            if group.len() < 5 {
+                // Too few to estimate a spread; keep them all.
+                out.extend(group.iter().map(|s| **s));
+                continue;
+            }
+
+            let med_x = median(&mut group.iter().map(|s| s.frame.gx).collect::<Vec<_>>());
+            let med_y = median(&mut group.iter().map(|s| s.frame.gy).collect::<Vec<_>>());
+            let mad_x = median(
+                &mut group.iter().map(|s| (s.frame.gx - med_x).abs()).collect::<Vec<_>>(),
+            )
+            .max(MAD_FLOOR);
+            let mad_y = median(
+                &mut group.iter().map(|s| (s.frame.gy - med_y).abs()).collect::<Vec<_>>(),
+            )
+            .max(MAD_FLOOR);
+
+            for s in group {
+                let dx = (s.frame.gx - med_x).abs() / mad_x;
+                let dy = (s.frame.gy - med_y).abs() / mad_y;
+                if dx <= MAD_REJECT && dy <= MAD_REJECT {
+                    out.push(*s);
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Fit the model from everything collected.
+    pub fn finish(
+        &self,
+        px_per_degree: f64,
+        display_fingerprint: impl Into<String>,
+    ) -> Result<CalibrationModel, CalibrationError> {
+        let samples = self.filtered_samples();
+        fit(&samples, px_per_degree, display_fingerprint)
+    }
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(gx: f64, gy: f64) -> GazeFrame {
+        GazeFrame { ok: true, quality: 1.0, gx, gy, ..Default::default() }
+    }
+
+    fn nine_targets() -> Vec<Vec2> {
+        let mut t = Vec::new();
+        for iy in 0..3 {
+            for ix in 0..3 {
+                t.push(Vec2::new(200.0 + 700.0 * ix as f64, 150.0 + 400.0 * iy as f64));
+            }
+        }
+        t
+    }
+
+    #[test]
+    fn rejects_blinking_and_low_quality_samples() {
+        let mut c = Collector::new(nine_targets());
+        assert_eq!(c.add(0, frame(0.1, 0.1), true, 0.4), SampleRejection::Blinking);
+        let mut low = frame(0.1, 0.1);
+        low.quality = 0.1;
+        assert_eq!(c.add(0, low, false, 0.4), SampleRejection::LowQuality);
+        let mut noface = frame(0.1, 0.1);
+        noface.ok = false;
+        assert_eq!(c.add(0, noface, false, 0.4), SampleRejection::NoFace);
+        assert_eq!(c.add(0, frame(0.1, 0.1), false, 0.4), SampleRejection::Accepted);
+
+        assert_eq!(c.accepted_count(), 1);
+        assert_eq!(c.rejected_count(), 3);
+    }
+
+    #[test]
+    fn rejects_unknown_target_index() {
+        let mut c = Collector::new(nine_targets());
+        assert_eq!(c.add(99, frame(0.0, 0.0), false, 0.4), SampleRejection::UnknownTarget);
+    }
+
+    #[test]
+    fn mad_filter_drops_a_glance_away() {
+        let mut c = Collector::new(nine_targets());
+        for _ in 0..30 {
+            c.add(0, frame(0.10, 0.10), false, 0.4);
+        }
+        // The user glanced elsewhere for two frames.
+        c.add(0, frame(0.90, -0.80), false, 0.4);
+        c.add(0, frame(0.85, -0.75), false, 0.4);
+
+        let kept = c.filtered_samples();
+        assert_eq!(kept.len(), 30, "outliers were not rejected");
+        assert!(kept.iter().all(|s| s.frame.gx < 0.5));
+    }
+
+    #[test]
+    fn mad_filter_keeps_small_groups_intact() {
+        let mut c = Collector::new(nine_targets());
+        for i in 0..4 {
+            c.add(0, frame(0.1 * i as f64, 0.0), false, 0.4);
+        }
+        assert_eq!(c.filtered_samples().len(), 4);
+    }
+
+    #[test]
+    fn end_to_end_collection_produces_a_model() {
+        let targets = nine_targets();
+        let mut c = Collector::new(targets.clone());
+        for (idx, t) in targets.iter().enumerate() {
+            // Invert the screen geometry into plausible gaze features.
+            let gx = (t.x - 900.0) / 3000.0;
+            let gy = (t.y - 550.0) / 2400.0;
+            for k in 0..25 {
+                let jitter = (k as f64 % 5.0 - 2.0) * 0.0008;
+                c.add(idx, frame(gx + jitter, gy - jitter), false, 0.4);
+            }
+        }
+        let model = c.finish(45.0, "fingerprint").expect("fit should succeed");
+        assert_eq!(model.report.targets, 9);
+        assert!(model.report.cross_validated);
+        assert!(model.report.mean_error_px.is_finite());
+        assert_eq!(model.display_fingerprint, "fingerprint");
+    }
+
+    #[test]
+    fn counts_per_target() {
+        let mut c = Collector::new(nine_targets());
+        for _ in 0..7 {
+            c.add(3, frame(0.0, 0.0), false, 0.4);
+        }
+        assert_eq!(c.count_for(3), 7);
+        assert_eq!(c.count_for(4), 0);
+    }
+}

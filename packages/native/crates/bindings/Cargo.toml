@@ -1,0 +1,18 @@
+[package]
+name = "eye-tracker-bindings"
+description = "napi-rs bindings for eye-tracker-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+eye-tracker-core = { path = "../core" }
+napi = { version = "3.11.0", default-features = false, features = ["napi8"] }
+napi-derive = "3.6.0"
+
+[build-dependencies]
+napi-build = "2.3.2"

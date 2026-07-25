@@ -1,0 +1,14 @@
+{
+  // Main + preload: Node/Electron environment. Deliberately WITHOUT the DOM lib,
+  // so main-process code cannot accidentally reach for browser globals.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node", "electron"],
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true
+  },
+  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.ts", "electron.vite.config.ts"]
+}

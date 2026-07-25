@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same PR makes the in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macOS is the supported target (ADR-0010) and the only platform where the
+    # CGEvent mouse backend compiles, so CI runs there rather than on Linux.
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Don't leave the job's token in .git/config where any later step (or
+          # a compromised dependency's install script) could read it.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/native/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/native/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Runs first and needs no JS toolchain: the pure Rust crate has no Node
+      # dependency by design (ADR-0004), so a failure here is unambiguous.
+      - name: Rust core tests
+        run: cargo test --manifest-path packages/native/Cargo.toml -p eye-tracker-core
+
+      - name: Clippy
+        run: cargo clippy --manifest-path packages/native/Cargo.toml --all-targets -- -D warnings
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Must precede typecheck: the native addon's .d.ts is generated at build
+      # time and is not committed.
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck

@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/bindings"]
+# napi-rs drives a plain `cargo build`; restricting the default member set makes
+# that build only the cdylib. `cargo test -p eye-tracker-core` targets the pure
+# crate explicitly (ADR-0004).
+default-members = ["crates/bindings"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+# NOTE: deliberately NOT `panic = "abort"`. napi-rs wraps every exported call in
+# `catch_unwind` to turn a Rust panic into a JS exception; aborting would take
+# the whole Electron process down instead.

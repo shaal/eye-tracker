@@ -1,0 +1,28 @@
+{
+  "name": "@eye-tracker/native",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rust core (gaze mapping, filtering, blink FSM, system mouse) exposed via napi-rs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "napi": {
+    "binaryName": "eye-tracker-native",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --release --platform --manifest-path crates/bindings/Cargo.toml --output-dir .",
+    "build:debug": "napi build --platform --manifest-path crates/bindings/Cargo.toml --output-dir .",
+    "test": "cargo test -p eye-tracker-core"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7.4"
+  }
+}
