@@ -7,10 +7,11 @@
  *
  * Work it through: at 1280×720 and a normal seating distance the eye is about
  * 115 px corner to corner, and across a full screen sweep the iris centre only
- * travels roughly ±25% of that — some ±29 px. `gx` divides the offset by the
- * eye width, so **one pixel of iris localisation error is about 3.5% of the
- * entire usable range.** On a 1920-wide screen that is ~70 px of cursor error
- * per pixel of wobble.
+ * travels roughly ±25% of that — a full span of some 58 px, which is 0.5 in
+ * `gx` since `gx` divides the offset by the eye width. So **one pixel of iris
+ * localisation error is 1/115 ≈ 0.0087 in `gx`, about 1.7% of the entire usable
+ * range.** On a 1920-wide screen that is ~33 px of cursor error per pixel of
+ * wobble.
  *
  * You cannot see that in a normal-sized preview. This view magnifies each eye
  * until a single camera pixel is a visible block, draws exactly the landmarks
@@ -249,7 +250,9 @@ export function eyeZoomReadout(input: EyeZoomInputs): {
   rows.push([
     'Resolvable steps',
     Number.isFinite(stepsX) ? `${stepsX.toFixed(0)} × ${stepsY.toFixed(0)}` : '—',
-    stepsX < 8 ? 'bad' : stepsX < 15 ? 'warn' : 'good',
+    // NaN fails both comparisons and would land in the final arm, painting an
+    // *unmeasured* signal green. Unknown must look unknown.
+    !Number.isFinite(stepsX) ? 'plain' : stepsX < 8 ? 'bad' : stepsX < 15 ? 'warn' : 'good',
   ]);
 
   // A large disagreement between the eyes means one iris is being mis-fit —

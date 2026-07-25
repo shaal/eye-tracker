@@ -90,8 +90,20 @@ export function validationDurationMs(targetCount = VALIDATION_POINT_COUNT): numb
  */
 export const MIN_VALIDATION_SAMPLES = 8;
 
+/**
+ * `'unknown'` is a distinct outcome, not a flavour of failure.
+ *
+ * Degrees are pixels divided by `pxPerDegree`, and that comes from display
+ * geometry the engine may simply not have. When it is missing the result is
+ * NaN — and NaN fails every `<` comparison, so a naive band ladder silently
+ * classifies an *unscored* run as the worst possible one. The user then sees
+ * "poor tracking" for a run that was never graded at all.
+ */
+export type Verdict = 'good' | 'usable' | 'poor' | 'unknown';
+
 /** Verdict bands, in degrees of visual angle. */
-export function accuracyVerdict(deg: number): 'good' | 'usable' | 'poor' {
+export function accuracyVerdict(deg: number): Verdict {
+  if (!Number.isFinite(deg)) return 'unknown';
   if (deg < 1.0) return 'good';
   if (deg < 2.0) return 'usable';
   return 'poor';
@@ -102,7 +114,8 @@ export function accuracyVerdict(deg: number): 'good' | 'usable' | 'poor' {
  * floor: whatever the accuracy is, you cannot reliably hit a target smaller
  * than roughly the precision cloud, no matter how well calibrated you are.
  */
-export function precisionVerdict(deg: number): 'good' | 'usable' | 'poor' {
+export function precisionVerdict(deg: number): Verdict {
+  if (!Number.isFinite(deg)) return 'unknown';
   if (deg < 0.5) return 'good';
   if (deg < 1.0) return 'usable';
   return 'poor';
@@ -118,6 +131,28 @@ export function precisionVerdict(deg: number): 'good' | 'usable' | 'poor' {
 export function diagnose(accuracyDeg: number, precisionDeg: number): string {
   const acc = accuracyVerdict(accuracyDeg);
   const prec = precisionVerdict(precisionDeg);
+
+  if (acc === 'unknown' || prec === 'unknown') {
+    return (
+      'Measured in pixels only — the display geometry needed to convert to degrees is not ' +
+      'available, so these figures cannot be graded against the usual thresholds. The pixel ' +
+      'numbers above are still valid; compare them against the size of what you are trying ' +
+      'to click.'
+    );
+  }
+
+  // Both bad is its own case, and it is *not* the noise case. Reporting
+  // "recalibrating will not help" here would be half right and wholly
+  // misleading: the mapping is demonstrably wrong too, so the user needs to fix
+  // the signal AND then recalibrate. Doing either alone leaves the other.
+  if (prec === 'poor' && acc === 'poor') {
+    return (
+      'Both noisy and off-target. These need fixing in order: first improve the signal — ' +
+      'more light on your face, sit closer, a better camera — because a calibration fitted ' +
+      'to a noisy signal will be wrong however carefully you do it. Then recalibrate, and ' +
+      'validate again.'
+    );
+  }
 
   if (prec === 'poor') {
     return (

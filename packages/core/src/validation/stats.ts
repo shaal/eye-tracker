@@ -6,7 +6,13 @@
  */
 
 import type { Point } from '../types.js';
-import { MIN_VALIDATION_SAMPLES, accuracyVerdict, diagnose, precisionVerdict } from './protocol.js';
+import {
+  MIN_VALIDATION_SAMPLES,
+  accuracyVerdict,
+  diagnose,
+  precisionVerdict,
+  type Verdict,
+} from './protocol.js';
 
 /** Everything recorded while the user fixated one validation dot. */
 export interface ValidationSamples {
@@ -51,8 +57,9 @@ export interface ValidationReport {
   /** Index into `targets` of the worst point, or -1. */
   worstIndex: number;
   pxPerDegree: number;
-  accuracyVerdict: 'good' | 'usable' | 'poor';
-  precisionVerdict: 'good' | 'usable' | 'poor';
+  /** `'unknown'` when the degree scale was unavailable — not a grade of poor. */
+  accuracyVerdict: Verdict;
+  precisionVerdict: Verdict;
   /** What the user should actually do about it. */
   advice: string;
 }
@@ -138,8 +145,10 @@ const EMPTY_REPORT = (pxPerDegree: number, dropped: number): ValidationReport =>
   meanFilteredPrecisionPx: Number.NaN,
   worstIndex: -1,
   pxPerDegree,
-  accuracyVerdict: 'poor',
-  precisionVerdict: 'poor',
+  // Nothing was measured, so nothing can be graded. 'poor' here would assert a
+  // finding the run never produced.
+  accuracyVerdict: 'unknown',
+  precisionVerdict: 'unknown',
   advice:
     'No target collected enough samples to score. That usually means tracking was lost — ' +
     'check that your face stays in frame and that quality stays above the guard threshold.',

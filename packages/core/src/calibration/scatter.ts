@@ -285,6 +285,23 @@ export function scatterAdvice(s: ScatterSummary): string {
   const x = separability(s.x.ratio);
   const y = separability(s.y.ratio);
 
+  // An axis with fewer than two occupied bands has no separability evidence at
+  // all — reachable whenever tracking was lost on enough targets that the
+  // survivors share a column or a row. Without this branch the NaN ratio failed
+  // every comparison below and fell through to the final "clean" verdict,
+  // printing `x NaN×` and, far worse, asserting that an unmeasured axis is
+  // fine. That is precisely the false negative this diagnostic exists to catch.
+  if (x === 'unknown' || y === 'unknown') {
+    const missing = [x === 'unknown' ? 'horizontal' : null, y === 'unknown' ? 'vertical' : null]
+      .filter(Boolean)
+      .join(' and ');
+    return (
+      `Not enough surviving targets to measure ${missing} separation — the clusters that ` +
+      'remain do not span enough of the grid. Tracking was probably lost during the run; ' +
+      'recalibrate and check that your face stays in frame throughout.'
+    );
+  }
+
   if (!s.x.monotonic || !s.y.monotonic) {
     return (
       'The clusters are out of order — the grid is folded rather than merely tight. ' +

@@ -23,9 +23,11 @@ Two pieces of arithmetic frame the whole problem.
 **1. The gaze signal is only a couple of pixels wide.** At 1280×720 and normal
 seating distance the eye is ~115 px corner to corner. `gx` is the iris offset
 divided by that width (ADR-0005), and across a full screen sweep the iris only
-travels about ±25% of the eye width — roughly ±29 px. So one pixel of iris
-localisation error is ~3.5% of the entire usable range, which on a 1920-wide
-screen is about **70 px of cursor error per pixel of landmark wobble**. Whether
+travels about ±25% of the eye width — a full span of roughly 58 px, or 0.5 in
+`gx`. So one pixel of iris localisation error is 1/115 ≈ 0.0087 in `gx`, which
+is ~1.7% of the usable range and, on a 1920-wide screen, about **33 px of cursor
+error per pixel of landmark wobble**. (An earlier draft said 70 px; that divided
+by the *half*-range while multiplying by the full screen width.) Whether
 the pipeline can work at all is decided at the sensor, and nothing downstream
 can recover what is not there.
 

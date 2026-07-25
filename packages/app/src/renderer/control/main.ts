@@ -51,8 +51,60 @@ const meter = (id: string, frac: number) => {
 };
 
 let latestFeatures: GazeFeatures | null = null;
+
+/**
+ * Snapshot of just the landmarks the eye-zoom view draws.
+ *
+ * MediaPipe owns the array it hands to `onFrame` and may reuse it, but the draw
+ * loop runs on its own animation-frame clock and reads whatever is stored here
+ * — so holding the original risks rendering coordinates from a *later* frame
+ * than the `GazeFeatures` drawn alongside them, which would show a landmark
+ * overlay that disagrees with its own numbers.
+ *
+ * Only the ~26 indices the view actually uses are copied, into objects
+ * allocated once, so the steady-state cost is 26 float writes per frame rather
+ * than a 478-element clone.
+ */
+const ZOOM_INDICES: readonly number[] = [
+  ...new Set([
+    ...EYE_A.corners,
+    EYE_A.irisCenter,
+    ...EYE_A.irisRim,
+    ...EYE_A.ear,
+    ...EYE_B.corners,
+    EYE_B.irisCenter,
+    ...EYE_B.irisRim,
+    ...EYE_B.ear,
+  ]),
+];
+
+/** Sparse, indexed to match MediaPipe's numbering so the drawing code is unchanged. */
+const landmarkSnapshot: Landmark[] = [];
+for (const i of ZOOM_INDICES) landmarkSnapshot[i] = { x: 0, y: 0, z: 0 };
+
 let latestLandmarks: readonly Landmark[] | null = null;
-/** Newest packed frame, for probing the model's local gain. */
+
+function snapshotLandmarks(source: readonly Landmark[] | null): readonly Landmark[] | null {
+  if (!source) return null;
+  for (const i of ZOOM_INDICES) {
+    const src = source[i];
+    const dst = landmarkSnapshot[i];
+    if (!src || !dst) continue;
+    dst.x = src.x;
+    dst.y = src.y;
+    dst.z = src.z;
+  }
+  return landmarkSnapshot;
+}
+
+/**
+ * Newest packed frame, for probing the model's local gain.
+ *
+ * Unlike the landmarks above this is *deliberately* the live reused buffer.
+ * The sensitivity probe runs on a one-second timer and wants the pose the user
+ * is in right now, not the one they were in when the timer was armed; the
+ * buffer is serialised at `invoke` time, so there is no tearing.
+ */
 let latestFrame: Float64Array | null = null;
 let cameraFps = 0;
 let lastFrameAt = 0;
@@ -108,7 +160,9 @@ function clearBanner(id: string): void {
 const vision = new VisionLoop(video, {
   onFrame(frame, features, inferenceMs, landmarks) {
     latestFeatures = features;
-    latestLandmarks = landmarks;
+    // Copied, not retained: the array belongs to MediaPipe and the draw loop
+    // reads it on a different clock (see `snapshotLandmarks`).
+    latestLandmarks = snapshotLandmarks(landmarks);
     latestFrame = frame;
 
     // Feed the noise-floor estimate only when there is a real measurement to
@@ -725,8 +779,14 @@ const valReport = $<HTMLDivElement>('val-report');
 valStart.addEventListener('click', async () => {
   valReport.hidden = true;
   valMapCanvas.hidden = true;
+  // Disabled before the round trip, not after: awaiting first leaves the button
+  // live long enough for a double click to start two runs, and the second would
+  // reset the sample buckets the first is still filling.
+  valStart.disabled = true;
+
   const targets = await window.eyeTracker.startValidation();
   if (targets.length === 0) {
+    valStart.disabled = false;
     setBanner({
       id: 'val-uncalibrated',
       level: 'warn',
@@ -735,7 +795,6 @@ valStart.addEventListener('click', async () => {
     return;
   }
   clearBanner('val-uncalibrated');
-  valStart.disabled = true;
   valCancel.hidden = false;
   valProgress.hidden = false;
   valProgress.textContent = `Starting… about ${Math.round(validationDurationMs() / 1000)}s`;
@@ -787,7 +846,10 @@ function renderValidationReport(report: ValidationReport): void {
   drawValidationMap(valMapCanvas, report, bounds);
 
   const worst = report.targets[report.worstIndex];
-  const cls = (v: string) => (v === 'good' ? 'good' : v === 'usable' ? 'warn' : 'bad');
+  // 'unknown' means the run could not be graded, which is not the same as being
+  // graded badly — it gets no colour rather than the failure colour.
+  const cls = (v: string) =>
+    v === 'good' ? 'good' : v === 'usable' ? 'warn' : v === 'poor' ? 'bad' : '';
   const px = (v: number) => (Number.isFinite(v) ? v.toFixed(0) : '—');
   const dg = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : '—');
 

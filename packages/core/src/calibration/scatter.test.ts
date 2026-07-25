@@ -158,6 +158,26 @@ test('a mirrored axis is healthy, a folded one is not', () => {
   assert.match(scatterAdvice(s), /folded/);
 });
 
+test('an axis with too few bands is unknown, never silently "clean"', () => {
+  // Tracking survived on only two targets, both in the same column. The
+  // horizontal axis then has one occupied band and no separation to measure.
+  // A NaN ratio fails every `<` comparison, so before the fix it fell through
+  // to the final "clean separation" verdict and printed `x NaN×` — asserting an
+  // unmeasured axis was fine.
+  const points = grid(0.05, 0.05, 0.005).filter(
+    (p) => p.targetIndex === 0 || p.targetIndex === 6, // same column, rows 0 and 2
+  );
+  const s = summarizeScatter(points, 9);
+
+  assert.equal(s.gridClusters, 2, 'reachable with gridClusters >= 2');
+  assert.equal(separability(s.x.ratio), 'unknown');
+
+  const advice = scatterAdvice(s);
+  assert.doesNotMatch(advice, /Clean separation/, 'must not claim clean on unmeasured evidence');
+  assert.doesNotMatch(advice, /NaN/, 'must not print NaN at the user');
+  assert.match(advice, /horizontal/i);
+});
+
 test('an empty scatter asks for a calibration rather than reporting failure', () => {
   const s = summarizeScatter([], 9);
   assert.equal(s.gridClusters, 0);

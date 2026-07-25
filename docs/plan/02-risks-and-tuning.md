@@ -32,8 +32,8 @@ recalibrating a problem that calibration cannot fix.
 
 The key number is the **noise floor** in view 1, converted to cursor pixels.
 Because `gx` is the iris offset divided by eye width (ADR-0005), the entire
-usable signal range is only about ±29 px of iris travel at 720p — so a single
-pixel of landmark wobble is roughly 70 px of cursor error. That is why signal
+usable signal range spans only about 58 px of iris travel at 720p — so a single
+pixel of landmark wobble is roughly 33 px of cursor error. That is why signal
 quality has to be ruled out first.
 
 ## Tuning playbook

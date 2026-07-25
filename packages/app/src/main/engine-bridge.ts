@@ -545,6 +545,13 @@ export class EngineBridge {
   startValidation(): Point[] {
     if (!this.engine.calibrated) return [];
 
+    // Symmetric with startCalibration(), which already cancels validation.
+    // Without this the calibration timer chain stays alive, keeps arming
+    // targets into the collector, and — because the overlay renders
+    // calibration in preference to validation — the user never even sees the
+    // dots they are being scored against.
+    if (this.calibration.active) this.cancelCalibration();
+
     this.clearValidationTimer();
     // Control stays off for the whole run: a cursor chasing your gaze while you
     // try to fixate a dot is a moving distractor, and it would contaminate the
@@ -571,7 +578,17 @@ export class EngineBridge {
 
     if (index >= this.validation.targets.length) {
       this.validationArmed = -1;
-      this.validation = { ...this.validation, phase: 'done', currentIndex: -1 };
+      // `active: false` at 'done', not just at finish. The run is over: nothing
+      // more will be collected, so holding it "active" only kept control
+      // blocked and Escape grabbed system-wide until the renderer happened to
+      // call finishValidation(). If it never did — panel closed, window
+      // reloaded, an exception in the report handler — the user was left unable
+      // to enable control, with Escape swallowed app-wide, and nothing on
+      // screen to explain why.
+      //
+      // `validationSamples` is deliberately untouched, so a later
+      // finishValidation() still scores this run.
+      this.validation = { ...this.validation, active: false, phase: 'done', currentIndex: -1 };
       this.emitValidation();
       return;
     }

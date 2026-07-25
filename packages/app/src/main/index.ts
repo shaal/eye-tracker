@@ -174,6 +174,18 @@ let skipKeysActive = false;
 
 function grab(keys: readonly string[], on: boolean, handler: () => void): void {
   for (const key of keys) {
+    // Never touch the kill-switch binding. If the user has bound control toggle
+    // to Escape or Space, grabbing it here would replace their registration for
+    // the run and then *unregister it outright* on release — leaving no kill
+    // switch while `shortcutRegistered` still claims there is one. That is
+    // exactly the fail-open state ADR-0011 exists to prevent, and losing a
+    // convenience key is a trivial price beside it.
+    if (key === settings.shortcut) {
+      console.warn(
+        `[shortcut] "${key}" is the kill switch — not grabbing it for calibration`,
+      );
+      continue;
+    }
     if (!on) {
       globalShortcut.unregister(key);
       continue;
@@ -221,12 +233,19 @@ let overlayInteractive = false;
 let overlayInteractiveGuard: NodeJS.Timeout | null = null;
 
 function setOverlayInteractive(on: boolean): void {
+  // Both early returns come BEFORE the timer is touched, and that ordering is
+  // load-bearing. Clearing first meant a redundant `true` call — any duplicate
+  // emit while already in the 'instruct' phase — disarmed the watchdog and then
+  // returned without re-arming it, leaving the "desktop nobody can click" case
+  // with no recovery at all. The net was being cancelled by the very state it
+  // exists to protect.
+  if (on === overlayInteractive) return;
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+
   if (overlayInteractiveGuard) {
     clearTimeout(overlayInteractiveGuard);
     overlayInteractiveGuard = null;
   }
-  if (on === overlayInteractive) return;
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
 
   overlayInteractive = on;
   if (on) {

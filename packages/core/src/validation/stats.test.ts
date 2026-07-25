@@ -100,6 +100,49 @@ test('degrees are NaN rather than Infinity when the scale is unknown', () => {
   assert.ok(Number.isFinite(r.meanAccuracyPx));
 });
 
+test('an unscored run reports "unknown", never "poor"', () => {
+  // NaN fails every `<` comparison, so a naive band ladder silently classifies
+  // an ungraded run as the worst possible one — telling the user their tracking
+  // is bad when it was simply never measured in degrees.
+  const r = summarizeValidation([cloud({ x: 500, y: 500 }, { x: 5, y: 0 }, 2)], 0);
+
+  assert.equal(r.accuracyVerdict, 'unknown');
+  assert.equal(r.precisionVerdict, 'unknown');
+  assert.doesNotMatch(r.advice, /noisy/i, 'must not diagnose noise from an unscored run');
+  assert.match(r.advice, /pixels only|cannot be graded/i);
+  // The pixel figures are still real and must survive.
+  assert.ok(Number.isFinite(r.meanAccuracyPx));
+  assert.ok(Number.isFinite(r.meanPrecisionPx));
+});
+
+test('a run that is both noisy and biased is told to fix both, in order', () => {
+  // Precision poor AND accuracy poor. Reporting only "recalibrating will not
+  // help" would be half right and wholly misleading — the mapping is wrong too.
+  const r = summarizeValidation(
+    [
+      cloud({ x: 200, y: 200 }, { x: 250, y: 120 }, 90),
+      cloud({ x: 900, y: 600 }, { x: 240, y: 130 }, 95),
+    ],
+    PX_PER_DEG,
+  );
+
+  assert.equal(r.accuracyVerdict, 'poor');
+  assert.equal(r.precisionVerdict, 'poor');
+  assert.match(r.advice, /both/i);
+  assert.match(r.advice, /recalibrate/i, 'must still tell them to recalibrate');
+  assert.doesNotMatch(
+    r.advice,
+    /Recalibrating will not help/i,
+    'that advice is for the noise-only case',
+  );
+});
+
+test('an empty run is unscored rather than graded poor', () => {
+  const r = summarizeValidation([{ target: { x: 0, y: 0 }, raw: [], filtered: [] }], PX_PER_DEG);
+  assert.equal(r.accuracyVerdict, 'unknown');
+  assert.equal(r.precisionVerdict, 'unknown');
+});
+
 test('the worst point is identified by accuracy', () => {
   const r = summarizeValidation(
     [

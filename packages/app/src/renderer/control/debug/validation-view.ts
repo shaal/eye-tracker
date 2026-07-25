@@ -78,8 +78,12 @@ export function drawValidationMap(
 
     // Bias arrow, target → mean prediction.
     const errDeg = report.pxPerDegree > 0 ? t.accuracyPx / report.pxPerDegree : Number.NaN;
-    const stroke =
-      errDeg < 1.0
+    // Without a degree scale there is no grade, and NaN would fail both
+    // comparisons and fall through to red — condemning a run that was simply
+    // never scored. Neutral blue says "measured, not graded".
+    const stroke = !Number.isFinite(errDeg)
+      ? 'rgba(120, 170, 255, 0.9)'
+      : errDeg < 1.0
         ? 'rgba(88, 214, 141, 0.95)'
         : errDeg < 2.0
           ? 'rgba(255, 209, 102, 0.95)'
