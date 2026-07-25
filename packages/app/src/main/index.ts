@@ -35,7 +35,16 @@ let vision: VisionStatus = {
 };
 
 // Single instance: two copies fighting over the cursor would be unrecoverable.
+//
+// Say so before quitting. Exiting silently here is genuinely confusing —
+// `npm run dev` prints a successful build, launches, and then appears to do
+// nothing at all, with no indication that an older copy is holding the lock.
 if (!app.requestSingleInstanceLock()) {
+  console.error(
+    '\n[eye-tracker] Another instance is already running, so this one is exiting.\n' +
+      '              Quit it first (⌘Q in its window), or:\n' +
+      '                pkill -f "eye-tracker/node_modules/electron"\n',
+  );
   app.quit();
 }
 
