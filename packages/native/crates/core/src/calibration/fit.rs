@@ -230,8 +230,8 @@ fn predict_with(
     let (phi, p) = expand(frame, tier);
     let mut x = fx.intercept;
     let mut y = fy.intercept;
-    for j in 0..p.min(MAX_FEATURES) {
-        let z = (phi[j] - std.mean[j]) / std.scale[j];
+    for (j, &v) in phi.iter().take(p.min(MAX_FEATURES)).enumerate() {
+        let z = (v - std.mean[j]) / std.scale[j];
         x += fx.beta[j] * z;
         y += fy.beta[j] * z;
     }

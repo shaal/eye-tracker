@@ -139,8 +139,8 @@ impl CalibrationModel {
         let (phi, n) = expand(f, self.tier);
         let mut x = self.intercept_x;
         let mut y = self.intercept_y;
-        for j in 0..n {
-            let z = (phi[j] - self.mean[j]) / self.scale[j];
+        for (j, &p) in phi.iter().take(n).enumerate() {
+            let z = (p - self.mean[j]) / self.scale[j];
             x += self.beta_x[j] * z;
             y += self.beta_y[j] * z;
         }

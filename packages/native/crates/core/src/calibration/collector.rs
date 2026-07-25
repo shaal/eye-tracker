@@ -131,7 +131,7 @@ impl Collector {
     }
 }
 
-fn median(v: &mut Vec<f64>) -> f64 {
+fn median(v: &mut [f64]) -> f64 {
     if v.is_empty() {
         return 0.0;
     }

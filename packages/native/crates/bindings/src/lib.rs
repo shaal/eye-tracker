@@ -140,7 +140,7 @@ fn apply_patch(cfg: &mut core::EngineConfig, p: &EngineConfigPatch) {
         // An unrecognised mode string is ignored rather than throwing: the
         // caller is a UI control, and silently keeping the current mode is
         // safer than leaving the engine half-configured.
-        if let Some(m) = b.mode.as_deref().and_then(ClickMode::from_str) {
+        if let Some(m) = b.mode.as_deref().and_then(ClickMode::from_name) {
             cfg.blink.mode = m;
         }
     }

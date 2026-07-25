@@ -24,7 +24,10 @@ impl ClickMode {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Deliberately not named `from_str`: that would shadow
+    /// `std::str::FromStr::from_str` at call sites without implementing the
+    /// trait, which is exactly the confusion clippy flags.
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "blink" => Some(ClickMode::Blink),
             "wink" => Some(ClickMode::Wink),

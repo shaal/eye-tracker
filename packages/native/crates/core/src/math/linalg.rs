@@ -29,7 +29,10 @@ pub fn cholesky_factor(a: &mut [f64], n: usize) -> Result<(), LinalgError> {
             let ljk = a[j * n + k];
             diag -= ljk * ljk;
         }
-        if !(diag > 0.0) || !diag.is_finite() {
+        // Ordered so NaN is rejected explicitly rather than relying on a
+        // negated comparison: `diag <= 0.0` is false for NaN, so the finiteness
+        // check has to come first.
+        if !diag.is_finite() || diag <= 0.0 {
             return Err(LinalgError::NotPositiveDefinite);
         }
         let ljj = diag.sqrt();
