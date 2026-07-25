@@ -23,5 +23,6 @@ supersedes the old one.
 | [0015](0015-head-motion-calibration.md)                | Head-motion calibration and pose-drift reporting  | Accepted |
 | [0016](0016-yield-to-physical-pointer.md)              | Yield to a physical mouse or trackpad             | Accepted |
 | [0017](0017-delivery-surfaces.md)                      | Browser / phone / Bluetooth-HID delivery options  | Proposed |
+| [0018](0018-diagnostics-and-validation.md)             | Diagnostics: signal quality vs. mapping error     | Accepted |
 
 Template: [0000-template.md](0000-template.md)

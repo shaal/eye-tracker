@@ -1,14 +1,28 @@
 import {
   CALIBRATION_TIMING,
+  FIXATION_INSTRUCTION,
   FIXATION_PROMPT,
+  FRAME_SLOTS,
+  FRAME_WIDTH,
   HEAD_MOTION_TIMING,
+  instructionDurationMs,
+  VALIDATION_PROMPT,
+  VALIDATION_TIMING,
   assertFrameLayout,
   headMotionTargets,
+  summarizeValidation,
+  validationTargets,
+  type CalibrationInstruction,
   type CalibrationProfile,
   type CalibrationReport,
+  type CalibrationScatter,
   type EngineFrameState,
+  type GazeSensitivity,
   type Point,
   type TuningPatch,
+  type ValidationReport,
+  type ValidationSamples,
+  type ValidationUiState,
 } from '@eye-tracker/core';
 import native from '@eye-tracker/native';
 
@@ -19,7 +33,7 @@ import { loadProfile, saveProfile } from './settings.js';
 const WATCHDOG_MS = 500;
 const WATCHDOG_TICK_MS = 150;
 
-export type CalibrationPhase = 'idle' | 'settle' | 'collect' | 'done';
+export type CalibrationPhase = 'idle' | 'instruct' | 'settle' | 'collect' | 'done';
 
 export interface CalibrationUi {
   active: boolean;
@@ -30,6 +44,9 @@ export interface CalibrationUi {
   samples: number;
   headMotion: boolean;
   prompt: string;
+  title: string;
+  detail: string;
+  instructionMs: number;
 }
 
 const IDLE_CALIBRATION: CalibrationUi = {
@@ -41,10 +58,23 @@ const IDLE_CALIBRATION: CalibrationUi = {
   samples: 0,
   headMotion: false,
   prompt: '',
+  title: '',
+  detail: '',
+  instructionMs: 0,
+};
+
+const IDLE_VALIDATION: ValidationUiState = {
+  active: false,
+  targets: [],
+  currentIndex: -1,
+  phase: 'idle',
+  samples: 0,
+  prompt: '',
 };
 
 type FrameListener = (state: EngineFrameState) => void;
 type CalibrationListener = (ui: CalibrationUi) => void;
+type ValidationListener = (ui: ValidationUiState) => void;
 
 /**
  * Owns the native engine and every piece of state that must survive a renderer
@@ -64,11 +94,20 @@ export class EngineBridge {
   /** Index at which the head-motion targets begin, or -1 when there are none. */
   private headMotionFrom = -1;
   private prompts: string[] = [];
+  private instructions: CalibrationInstruction[] = [];
   private calibrationTimer: NodeJS.Timeout | null = null;
   private watchdog: NodeJS.Timeout | null = null;
 
+  private validation: ValidationUiState = { ...IDLE_VALIDATION };
+  /** Armed target index while validation is sampling, or -1. */
+  private validationArmed = -1;
+  private validationSamples: ValidationSamples[] = [];
+  private validationTimer: NodeJS.Timeout | null = null;
+  private validationMinQuality = 0;
+
   private frameListeners = new Set<FrameListener>();
   private calibrationListeners = new Set<CalibrationListener>();
+  private validationListeners = new Set<ValidationListener>();
 
   constructor(tuning: TuningPatch) {
     // Fail loudly if the packed layout has drifted (ADR-0009).
@@ -102,6 +141,7 @@ export class EngineBridge {
   dispose(): void {
     if (this.watchdog) clearInterval(this.watchdog);
     if (this.calibrationTimer) clearTimeout(this.calibrationTimer);
+    this.clearValidationTimer();
     this.setControlEnabled(false);
   }
 
@@ -113,6 +153,11 @@ export class EngineBridge {
   onCalibration(cb: CalibrationListener): () => void {
     this.calibrationListeners.add(cb);
     return () => this.calibrationListeners.delete(cb);
+  }
+
+  onValidation(cb: ValidationListener): () => void {
+    this.validationListeners.add(cb);
+    return () => this.validationListeners.delete(cb);
   }
 
   // ---- hot path ------------------------------------------------------
@@ -141,8 +186,35 @@ export class EngineBridge {
     this.lastFrameAtMs = Date.now();
 
     this.lastState = state;
+    this.collectValidationSample(state);
     for (const cb of this.frameListeners) cb(state);
     return state;
+  }
+
+  /**
+   * Record one prediction against the armed validation target.
+   *
+   * Both the unfiltered model output and the filtered cursor are kept. Scoring
+   * the raw values measures the *model*, which is what recalibration can fix;
+   * comparing the two shows what the smoothing pipeline bought, which is what
+   * the filter sliders can fix. One number could not answer both.
+   */
+  private collectValidationSample(state: EngineFrameState): void {
+    if (this.validationArmed < 0) return;
+    const bucket = this.validationSamples[this.validationArmed];
+    if (!bucket) return;
+
+    // The same admissions test the calibration collector applies: a prediction
+    // made while the eyes are shut or the face is lost is not a measurement of
+    // accuracy, it is a measurement of the guard.
+    if (!state.hasGaze || state.blinkPhase !== 0) return;
+    // Snapshotted at run start rather than read per frame: `getConfig()`
+    // allocates a JS object across the napi boundary, and this runs at camera
+    // rate.
+    if (state.quality < this.validationMinQuality) return;
+
+    bucket.raw.push({ x: state.rawX, y: state.rawY });
+    bucket.filtered.push({ x: state.x, y: state.y });
   }
 
   get state(): EngineFrameState | null {
@@ -158,6 +230,9 @@ export class EngineBridge {
       if (!native.checkAccessibilityPermission(false)) return false;
       if (!this.engine.calibrated) return false;
       if (this.calibration.active) return false;
+      // A cursor moving under the validation dots would both distract the user
+      // and corrupt the measurement (ADR-0011).
+      if (this.validation.active) return false;
       this.wantControl = true;
       return true;
     }
@@ -204,6 +279,9 @@ export class EngineBridge {
 
     console.warn('[engine] display layout changed — calibration invalidated');
     this.fingerprint = next;
+    // Validation targets are absolute screen coordinates from the old layout,
+    // so anything still in flight is measuring against the wrong points.
+    if (this.validation.active) this.cancelValidation();
     this.setControlEnabled(false);
     this.engine.clearCalibration();
     this.restoreProfile();
@@ -240,11 +318,17 @@ export class EngineBridge {
     // the wrong target.
     this.clearCalibrationTimer();
     if (this.calibration.active) this.engine.cancelCalibration();
+    // A validation run in flight would keep arming targets and stealing frames
+    // into buckets that no longer mean anything once the model is refitted.
+    if (this.validation.active) this.cancelValidation();
 
     this.setControlEnabled(false);
     const bounds = primaryBounds();
     const grid = native.calibrationTargets(bounds, points) as Point[];
     const prompts = grid.map(() => FIXATION_PROMPT);
+    // All nine fixation dots share one instruction, which is what makes the
+    // "only show it when it changes" rule collapse them into a single card.
+    const instructions: CalibrationInstruction[] = grid.map(() => FIXATION_INSTRUCTION);
 
     let targets = grid;
     this.headMotionFrom = -1;
@@ -253,9 +337,11 @@ export class EngineBridge {
       this.headMotionFrom = grid.length;
       targets = [...grid, ...extra.map((t) => ({ x: t.x, y: t.y }))];
       prompts.push(...extra.map((t) => t.prompt));
+      instructions.push(...extra.map((t) => ({ title: t.title, detail: t.detail })));
     }
 
     this.prompts = prompts;
+    this.instructions = instructions;
     this.engine.beginCalibration(targets);
 
     this.calibration = {
@@ -266,6 +352,23 @@ export class EngineBridge {
     };
     this.advanceCalibration(0);
     return targets;
+  }
+
+  /**
+   * Whether target `index` needs its own instruction card.
+   *
+   * True for the first target, and thereafter only when the instruction differs
+   * from the previous one. Showing an identical card before each of the nine
+   * fixation dots would be nine interruptions carrying one instruction's worth
+   * of information — and users correctly learn to dismiss repeated cards
+   * without reading them, which would defeat the card that actually matters.
+   */
+  private needsInstruction(index: number): boolean {
+    const here = this.instructions[index];
+    if (!here) return false;
+    if (index === 0) return true;
+    const before = this.instructions[index - 1];
+    return !before || before.title !== here.title || before.detail !== here.detail;
   }
 
   private isHeadMotionIndex(i: number): boolean {
@@ -293,18 +396,72 @@ export class EngineBridge {
       ? HEAD_MOTION_TIMING
       : CALIBRATION_TIMING;
 
-    // Phase 1: settle. Target is shown and animates; nothing is collected.
+    const instruction = this.instructions[index] ?? FIXATION_INSTRUCTION;
+    const instructionMs = this.needsInstruction(index)
+      ? instructionDurationMs(`${instruction.title} ${instruction.detail}`)
+      : 0;
+
+    // Nothing is armed during any of this; collection only starts below.
     this.engine.setCalibrationTarget(null);
     this.calibration = {
       ...this.calibration,
       currentIndex: index,
-      phase: 'settle',
+      // Phase 0: instruct. Full-screen card, no dot, nothing collected.
+      phase: instructionMs > 0 ? 'instruct' : 'settle',
       progress: index / this.calibration.targets.length,
       headMotion,
       prompt: this.prompts[index] ?? FIXATION_PROMPT,
+      title: instruction.title,
+      detail: instruction.detail,
+      instructionMs,
     };
     this.emitCalibration();
 
+    // The rest of the sequence is identical either way; when there is no card
+    // to show, the delay before it is simply zero.
+    this.calibrationTimer = setTimeout(() => {
+      if (!this.calibration.active) return;
+      if (instructionMs > 0) {
+        // Phase 1: settle. Target appears and animates; nothing is collected.
+        this.calibration = { ...this.calibration, phase: 'settle' };
+        this.emitCalibration();
+      }
+      this.runSettleAndCollect(index, settleMs, collectMs, discardMs, gapMs);
+    }, instructionMs);
+  }
+
+  /**
+   * Dismiss the instruction card and go straight to the dot.
+   *
+   * Only valid during the 'instruct' phase — deliberately. Letting a keypress
+   * skip a *settle* or *collect* phase would silently degrade the fit: settle
+   * exists so the fixation has landed before sampling, and collect is the
+   * sampling. A user mashing space to hurry things along would produce a
+   * calibration that looks complete and is quietly worse, which is the failure
+   * mode this whole diagnostic effort exists to eliminate.
+   *
+   * No-op in every other phase, so a stray keypress cannot corrupt a run.
+   */
+  skipInstruction(): void {
+    if (!this.calibration.active || this.calibration.phase !== 'instruct') return;
+    const index = this.calibration.currentIndex;
+    if (index < 0 || index >= this.calibration.targets.length) return;
+
+    this.clearCalibrationTimer();
+    const t = this.isHeadMotionIndex(index) ? HEAD_MOTION_TIMING : CALIBRATION_TIMING;
+    this.calibration = { ...this.calibration, phase: 'settle' };
+    this.emitCalibration();
+    this.runSettleAndCollect(index, t.settleMs, t.collectMs, t.discardMs, t.gapMs);
+  }
+
+  /** The per-target sampling sequence, once any instruction card has cleared. */
+  private runSettleAndCollect(
+    index: number,
+    settleMs: number,
+    collectMs: number,
+    discardMs: number,
+    gapMs: number,
+  ): void {
     this.calibrationTimer = setTimeout(() => {
       if (!this.calibration.active) return;
 
@@ -363,6 +520,203 @@ export class EngineBridge {
 
   private emitCalibration(): void {
     for (const cb of this.calibrationListeners) cb(this.calibration);
+  }
+
+  // ---- validation ----------------------------------------------------
+
+  get validationUi(): ValidationUiState {
+    return this.validation;
+  }
+
+  get validating(): boolean {
+    return this.validation.active;
+  }
+
+  /**
+   * Measure the loaded model against fresh fixations at points it was not
+   * fitted to.
+   *
+   * Unlike calibration this collects nothing for the engine — it only watches
+   * what the engine already predicts, so it never mutates the model. That is
+   * what makes it safe to re-run as often as you like.
+   *
+   * Returns an empty array when there is nothing to validate.
+   */
+  startValidation(): Point[] {
+    if (!this.engine.calibrated) return [];
+
+    this.clearValidationTimer();
+    // Control stays off for the whole run: a cursor chasing your gaze while you
+    // try to fixate a dot is a moving distractor, and it would contaminate the
+    // very measurement being taken.
+    this.setControlEnabled(false);
+
+    const targets = validationTargets(primaryBounds());
+    this.validationSamples = targets.map((t) => ({ target: t, raw: [], filtered: [] }));
+    const cfg = this.engine.getConfig() as unknown as { minQuality?: number };
+    this.validationMinQuality = cfg.minQuality ?? 0;
+
+    this.validation = {
+      ...IDLE_VALIDATION,
+      active: true,
+      targets,
+      prompt: VALIDATION_PROMPT,
+    };
+    this.advanceValidation(0);
+    return targets;
+  }
+
+  private advanceValidation(index: number): void {
+    if (!this.validation.active) return;
+
+    if (index >= this.validation.targets.length) {
+      this.validationArmed = -1;
+      this.validation = { ...this.validation, phase: 'done', currentIndex: -1 };
+      this.emitValidation();
+      return;
+    }
+
+    const { settleMs, collectMs, discardMs, gapMs } = VALIDATION_TIMING;
+
+    this.validationArmed = -1;
+    this.validation = { ...this.validation, currentIndex: index, phase: 'settle', samples: 0 };
+    this.emitValidation();
+
+    this.validationTimer = setTimeout(() => {
+      if (!this.validation.active) return;
+      this.validation = { ...this.validation, phase: 'collect' };
+      this.emitValidation();
+
+      // Discard the saccade transit before arming, exactly as calibration does
+      // — samples taken in flight belong to the previous target.
+      this.validationTimer = setTimeout(() => {
+        if (!this.validation.active) return;
+        this.validationArmed = index;
+
+        this.validationTimer = setTimeout(() => {
+          if (!this.validation.active) return;
+          this.validationArmed = -1;
+          this.validation = {
+            ...this.validation,
+            samples: this.validationSamples[index]?.raw.length ?? 0,
+          };
+          this.emitValidation();
+
+          this.validationTimer = setTimeout(() => this.advanceValidation(index + 1), gapMs);
+        }, collectMs - discardMs);
+      }, discardMs);
+    }, settleMs);
+  }
+
+  finishValidation(): ValidationReport {
+    this.clearValidationTimer();
+    this.validationArmed = -1;
+    const cfg = this.engine.getConfig() as unknown as { pxPerDegree?: number };
+    const report = summarizeValidation(this.validationSamples, cfg.pxPerDegree ?? 0);
+    this.validation = { ...IDLE_VALIDATION };
+    this.emitValidation();
+    return report;
+  }
+
+  cancelValidation(): void {
+    this.clearValidationTimer();
+    this.validationArmed = -1;
+    this.validationSamples = [];
+    this.validation = { ...IDLE_VALIDATION };
+    this.emitValidation();
+  }
+
+  private clearValidationTimer(): void {
+    if (this.validationTimer) {
+      clearTimeout(this.validationTimer);
+      this.validationTimer = null;
+    }
+  }
+
+  private emitValidation(): void {
+    for (const cb of this.validationListeners) cb(this.validation);
+  }
+
+  // ---- debug probes --------------------------------------------------
+
+  /**
+   * The loaded model, for the debug HUD's per-axis pose-drift breakdown.
+   *
+   * The engine reports drift as one worst-axis number, which cannot say
+   * *which* axis moved — and "sit up" versus "stop turning" versus "move back"
+   * are different instructions (ADR-0015).
+   */
+  calibrationProfile(): CalibrationProfile | null {
+    const m = this.engine.getCalibration();
+    return m ? (m as unknown as CalibrationProfile) : null;
+  }
+
+  /**
+   * Gaze-feature scatter from the last calibration run, with the fixation-grid
+   * boundary so the debug view can exclude head-motion targets from its
+   * separability metric.
+   *
+   * `headMotionFrom` and the engine's retained scatter have exactly the same
+   * lifetime — both are set by a run and replaced by the next one — so they
+   * cannot disagree about which targets were which.
+   */
+  calibrationScatter(): CalibrationScatter {
+    const points = this.engine.calibrationScatter().map((p) => ({
+      gx: p.gx,
+      gy: p.gy,
+      targetIndex: p.targetIndex,
+      kept: p.kept,
+    }));
+
+    // -1 means the run had no head-motion phase, so every target was grid.
+    const gridCount =
+      this.headMotionFrom >= 0
+        ? this.headMotionFrom
+        : points.reduce((max, p) => Math.max(max, p.targetIndex + 1), 0);
+
+    return { points, gridCount };
+  }
+
+  /**
+   * Screen pixels per unit of iris offset, at the current head pose.
+   *
+   * Measured by central differences through the real model rather than read off
+   * the coefficients, because the mapping is quadratic and has gaze×head cross
+   * terms — the local gain genuinely depends on where you are looking and how
+   * you are sitting, and the coefficient of `gx` alone would be wrong.
+   *
+   * `frame` is a live packed frame, so the probe is taken about the user's
+   * actual current pose rather than an imagined neutral one.
+   */
+  gazeSensitivity(frame: Float64Array): GazeSensitivity {
+    const NONE: GazeSensitivity = { pxPerGx: Number.NaN, pxPerGy: Number.NaN, calibrated: false };
+    if (!this.engine.calibrated || frame.length !== FRAME_WIDTH) return NONE;
+
+    // Step size: small enough to stay local, large enough that the difference
+    // is not lost in f64 rounding of a ~1000 px prediction.
+    const H = 0.01;
+    const probe = (slot: number, delta: number): Point | null => {
+      const copy = Float64Array.from(frame);
+      copy[slot] = (copy[slot] ?? 0) + delta;
+      // Force a valid face, so the probe works even mid-blink.
+      copy[FRAME_SLOTS.OK] = 1;
+      return this.engine.predictFrame(copy);
+    };
+
+    const gxPlus = probe(FRAME_SLOTS.GX, H);
+    const gxMinus = probe(FRAME_SLOTS.GX, -H);
+    const gyPlus = probe(FRAME_SLOTS.GY, H);
+    const gyMinus = probe(FRAME_SLOTS.GY, -H);
+    if (!gxPlus || !gxMinus || !gyPlus || !gyMinus) return NONE;
+
+    return {
+      // Magnitude of the displacement, not just the x component: tilting the
+      // head makes a horizontal eye movement move the cursor diagonally, and
+      // the noise budget cares about total distance.
+      pxPerGx: Math.hypot(gxPlus.x - gxMinus.x, gxPlus.y - gxMinus.y) / (2 * H),
+      pxPerGy: Math.hypot(gyPlus.x - gyMinus.x, gyPlus.y - gyMinus.y) / (2 * H),
+      calibrated: true,
+    };
   }
 }
 

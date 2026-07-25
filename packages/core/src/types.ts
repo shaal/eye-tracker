@@ -42,6 +42,12 @@ export const CLICK_MODE_LABELS: Record<ClickMode, string> = {
 /** Per-frame result from the native engine, forwarded to the UI. */
 export interface EngineFrameState {
   hasGaze: boolean;
+  /**
+   * This frame's tracking confidence. Distinct from `guardReason`, which
+   * reports only the first blocking condition — while control is disabled it
+   * says so and hides a quality problem completely.
+   */
+  quality: number;
   x: number;
   y: number;
   rawX: number;
@@ -136,6 +142,44 @@ export interface CalibrationProfile {
   poseStd: number[];
 }
 
+/** One calibration sample in gaze-feature space. Mirrors `ScatterPointJs`. */
+export interface CalibrationScatterPoint {
+  gx: number;
+  gy: number;
+  targetIndex: number;
+  /** False when the outlier filter dropped it from the fit. */
+  kept: boolean;
+}
+
+export interface CalibrationScatter {
+  points: CalibrationScatterPoint[];
+  /**
+   * How many of the targets were fixation-grid points; indices at or above this
+   * are head-motion targets.
+   *
+   * Essential rather than cosmetic. Head-motion targets sit at the *same*
+   * screen positions as fixation targets and have deliberately enormous spread,
+   * so any separability metric that includes them reports failure regardless of
+   * how good the signal is (ADR-0018).
+   */
+  gridCount: number;
+}
+
+/**
+ * How many screen pixels one unit of iris offset is worth, measured from the
+ * loaded model by finite differences.
+ *
+ * This is the conversion that makes raw feature noise legible: a jitter of
+ * 0.004 in `gx` means nothing on its own, but multiplied by `pxPerGx` it
+ * becomes "your cursor cannot sit still to better than 90 px" (ADR-0005).
+ */
+export interface GazeSensitivity {
+  pxPerGx: number;
+  pxPerGy: number;
+  /** False when nothing is calibrated, in which case the values are NaN. */
+  calibrated: boolean;
+}
+
 /** Live-tunable engine parameters (ADR-0007, ADR-0008, ADR-0013, ADR-0016). */
 export interface TuningPatch {
   filter?: Partial<{
@@ -196,14 +240,28 @@ export interface OverlayState {
   /** Non-zero briefly after a click, for the click flash. */
   clickPulse: number;
   guardReason: string;
+  /**
+   * A fixed reference dot for the continuous accuracy probe (debug mode 4).
+   *
+   * Unlike a validation run this never sequences or blocks anything: the dot
+   * just sits there, and the debug panel reports the live offset between it and
+   * the gaze estimate. It is the tool for "it was fine a minute ago" — lean
+   * back, turn your head, change the lighting, and watch the offset move.
+   */
+  probeVisible: boolean;
+  probeX: number;
+  probeY: number;
 }
 
 export interface CalibrationUiState {
   active: boolean;
   targets: Point[];
   currentIndex: number;
-  /** 'settle' draws an attracting animation; 'collect' is sampling. */
-  phase: 'idle' | 'settle' | 'collect' | 'done';
+  /**
+   * 'instruct' shows a full-screen card and collects nothing; 'settle' draws an
+   * attracting animation; 'collect' is sampling.
+   */
+  phase: 'idle' | 'instruct' | 'settle' | 'collect' | 'done';
   progress: number;
   samples: number;
   /**
@@ -212,6 +270,17 @@ export interface CalibrationUiState {
    * terms something to fit (ADR-0015).
    */
   headMotion: boolean;
-  /** Instruction shown under the target. */
+  /** Short reminder shown under the target while sampling. */
   prompt: string;
+  /**
+   * Full-screen card shown during the 'instruct' phase.
+   *
+   * Only shown when the instruction actually *changes* — the nine fixation dots
+   * share one instruction, so they get a single card between them rather than
+   * nine identical interruptions, which users learn to ignore.
+   */
+  title: string;
+  detail: string;
+  /** How long the current instruction card lasts, for the countdown. */
+  instructionMs: number;
 }

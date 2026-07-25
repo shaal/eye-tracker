@@ -22,10 +22,11 @@
     "dev": "npm run build:native && npm run build:core && npm run dev --workspace @eye-tracker/app",
     "start": "npm run dev",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test:native",
+    "test": "npm run test:native && npm run test:core",
     "smoke:mouse": "node scripts/smoke-mouse.mjs",
     "smoke:app": "npm run build && node scripts/smoke-app.mjs",
     "test:native": "cargo test --manifest-path packages/native/Cargo.toml -p eye-tracker-core",
+    "test:core": "npm run build:core && node --test \"packages/core/dist/**/*.test.js\"",
     "clean": "rm -rf packages/*/dist packages/*/out packages/native/target packages/native/*.node"
   },
   "devDependencies": {
