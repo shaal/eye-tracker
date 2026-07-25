@@ -15,6 +15,27 @@
 | R9 | **Electron/MediaPipe version churn.** | Medium | Low | Vendored model assets; pinned versions; no runtime network fetch. |
 | R10 | **Fixation clamp sticks.** A stuck cursor reads as a crash. | Medium | Medium | Hard timeout on the clamp; HUD shows clamp state explicitly. |
 
+## Diagnosing "it isn't accurate"
+
+Before turning any knob, open **Debug & diagnostics** in the control window and
+work down it in order (ADR-0018). Each view rules out one cause, and the causes
+have *different* remedies — the most common failure is spending an afternoon
+recalibrating a problem that calibration cannot fix.
+
+| Question | View | If the answer is bad |
+|----------|------|----------------------|
+| Is there a usable signal at all? | **1 · Eye zoom** — check "Resolvable steps" and "Signal travel" | Under ~8 resolvable steps, or travel under 0.10 after looking hard left then hard right: the camera is not resolving your gaze. Sit closer, add light on your face, or use a better sensor. Nothing else will help. |
+| Is the instability noise, lag, or a stuck clamp? | **2 · Scope** | Fuzzy red = noise (go back to view 1). Blue trailing red = smoothing lag (see below). Flat blue while red moves = clamp stuck (see R10). |
+| How wrong is it, and in what way? | **3 · Validation** | Large arrows, small ellipses → recalibrate. Large ellipses → signal noise; recalibrating will not help. |
+| It worked earlier — what changed? | **4 · Probe** + **6 · Pose drift** | Change one thing at a time and watch the offset. Any axis past 3σ means you have moved outside where the model was fitted. |
+| Was the calibration ever going to work? | **5 · Scatter** | Overlapping clusters mean the input never separated the targets. Refitting is pointless. |
+
+The key number is the **noise floor** in view 1, converted to cursor pixels.
+Because `gx` is the iris offset divided by eye width (ADR-0005), the entire
+usable signal range spans only about 58 px of iris travel at 720p — so a single
+pixel of landmark wobble is roughly 33 px of cursor error. That is why signal
+quality has to be ruled out first.
+
 ## Tuning playbook
 
 Symptom → knob. All are live-adjustable (M6); none require a rebuild.

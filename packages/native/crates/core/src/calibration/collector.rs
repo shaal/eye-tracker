@@ -23,6 +23,21 @@ pub enum SampleRejection {
     UnknownTarget,
 }
 
+/// One collected sample, reduced to what the debug scatter plot needs.
+///
+/// The point of exposing this is diagnostic: if the per-target clusters overlap
+/// in (gx, gy) space, no regression can separate them and the calibration was
+/// doomed before `fit()` ran. That is a completely different message to the
+/// user than "poor calibration, try again".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScatterPoint {
+    pub gx: f64,
+    pub gy: f64,
+    pub target_index: usize,
+    /// False when the MAD filter dropped this sample as an outlier.
+    pub kept: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Collector {
     targets: Vec<Vec2>,
@@ -82,10 +97,12 @@ impl Collector {
         SampleRejection::Accepted
     }
 
-    /// Drop per-target outliers by median absolute deviation on the gaze
-    /// features. A user glancing away mid-target produces samples that would
-    /// otherwise drag the whole fit.
-    fn filtered_samples(&self) -> Vec<CalibSample> {
+    /// Tag every sample with whether the MAD filter keeps it.
+    ///
+    /// The keep/drop decision and the scatter plot must agree exactly, so both
+    /// are derived from this one pass rather than from two copies of the same
+    /// threshold logic.
+    fn partition(&self) -> Vec<(CalibSample, bool)> {
         let mut out = Vec::with_capacity(self.samples.len());
 
         for (idx, _) in self.targets.iter().enumerate() {
@@ -93,7 +110,7 @@ impl Collector {
                 self.samples.iter().filter(|s| s.target_index == idx).collect();
             if group.len() < 5 {
                 // Too few to estimate a spread; keep them all.
-                out.extend(group.iter().map(|s| **s));
+                out.extend(group.iter().map(|s| (**s, true)));
                 continue;
             }
 
@@ -111,13 +128,31 @@ impl Collector {
             for s in group {
                 let dx = (s.frame.gx - med_x).abs() / mad_x;
                 let dy = (s.frame.gy - med_y).abs() / mad_y;
-                if dx <= MAD_REJECT && dy <= MAD_REJECT {
-                    out.push(*s);
-                }
+                out.push((*s, dx <= MAD_REJECT && dy <= MAD_REJECT));
             }
         }
 
         out
+    }
+
+    /// Drop per-target outliers by median absolute deviation on the gaze
+    /// features. A user glancing away mid-target produces samples that would
+    /// otherwise drag the whole fit.
+    fn filtered_samples(&self) -> Vec<CalibSample> {
+        self.partition().into_iter().filter(|(_, kept)| *kept).map(|(s, _)| s).collect()
+    }
+
+    /// Every collected sample in gaze-feature space, for the debug scatter.
+    pub fn scatter(&self) -> Vec<ScatterPoint> {
+        self.partition()
+            .into_iter()
+            .map(|(s, kept)| ScatterPoint {
+                gx: s.frame.gx,
+                gy: s.frame.gy,
+                target_index: s.target_index,
+                kept,
+            })
+            .collect()
     }
 
     /// Fit the model from everything collected.
@@ -197,6 +232,24 @@ mod tests {
         let kept = c.filtered_samples();
         assert_eq!(kept.len(), 30, "outliers were not rejected");
         assert!(kept.iter().all(|s| s.frame.gx < 0.5));
+    }
+
+    /// The scatter must report every sample, including the ones the fit threw
+    /// away — seeing *which* points were rejected is half of its diagnostic
+    /// value — and its keep flags must match what `filtered_samples` did.
+    #[test]
+    fn scatter_reports_every_sample_and_agrees_with_the_filter() {
+        let mut c = Collector::new(nine_targets());
+        for _ in 0..30 {
+            c.add(0, frame(0.10, 0.10), false, 0.4);
+        }
+        c.add(0, frame(0.90, -0.80), false, 0.4);
+
+        let scatter = c.scatter();
+        assert_eq!(scatter.len(), 31, "scatter must include rejected samples");
+        assert_eq!(scatter.iter().filter(|p| p.kept).count(), c.filtered_samples().len());
+        assert!(scatter.iter().any(|p| !p.kept && p.gx > 0.5), "the glance-away must be flagged");
+        assert!(scatter.iter().all(|p| p.target_index == 0));
     }
 
     #[test]

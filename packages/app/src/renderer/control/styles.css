@@ -365,3 +365,171 @@ code {
   padding: 1px 5px;
   border-radius: 4px;
 }
+
+/* ---------------------------------------------------------------------------
+   Debug panel
+   --------------------------------------------------------------------------- */
+
+/* Spans the grid so the wide canvases (scope, error map) are legible. A
+   validation arrow squeezed into a 340px column is unreadable. */
+.panel-wide {
+  grid-column: 1 / -1;
+}
+
+#debug-panel > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#debug-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+#debug-panel > summary::before {
+  content: '▸';
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#debug-panel[open] > summary::before {
+  content: '▾';
+}
+
+#debug-panel > summary h2 {
+  margin: 0;
+}
+
+.debug-block {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.debug-block:first-of-type {
+  border-top: none;
+}
+
+.debug-block h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.debug-canvas {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  background: #0b0e13;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.debug-canvas-eyes {
+  height: 190px;
+}
+
+.debug-canvas-scope {
+  height: 150px;
+}
+
+/* Constrained to something near-square. A 2-D scatter stretched across the
+   full panel width is unreadable, and with equal-aspect scaling it would also
+   waste most of the canvas on letterboxing. */
+.scatter-wrap {
+  max-width: 620px;
+  margin-top: 10px;
+}
+
+.debug-canvas-scatter {
+  height: 480px;
+  margin-top: 0;
+}
+
+.check-inline {
+  margin: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.debug-block .stats {
+  margin-top: 10px;
+}
+
+/* Verdict colouring: the numbers are only useful if you can tell at a glance
+   which of them is the problem. */
+.stats dd.good {
+  color: var(--accent);
+}
+
+.stats dd.warn {
+  color: var(--warn);
+}
+
+.stats dd.bad {
+  color: var(--error);
+}
+
+.field-inline {
+  margin-top: 0;
+  min-width: 190px;
+}
+
+.pose-axes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.pose-axis {
+  display: grid;
+  grid-template-columns: 110px 1fr 84px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pose-bar {
+  height: 8px;
+  background: #0f141c;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+/* The 3σ mark, where the engine considers the model to be extrapolating. */
+.pose-bar::after {
+  content: '';
+  position: absolute;
+  left: 60%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.pose-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.12s linear;
+}
+
+.pose-fill.warn {
+  background: var(--warn);
+}
+
+.pose-fill.bad {
+  background: var(--error);
+}
+
+.pose-axis .value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+}

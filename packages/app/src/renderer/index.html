@@ -153,6 +153,147 @@
           <button id="dbg-dblclick" class="btn btn-ghost">Double click</button>
         </div>
       </section>
+
+      <!--
+        Debug panel. Collapsed by default: these views answer "why is it
+        inaccurate", which is not a question you have every session.
+      -->
+      <section class="panel panel-wide">
+        <details id="debug-panel">
+          <summary><h2>Debug &amp; diagnostics</h2></summary>
+
+          <p class="hint">
+            Work down this list in order. Each view rules out one cause, and a
+            cause ruled out here saves recalibrating for something calibration
+            cannot fix.
+          </p>
+
+          <!-- 1 — eye zoom -->
+          <div class="debug-block">
+            <h3>1 · Eye zoom — is the signal there at all?</h3>
+            <p class="hint">
+              Your entire gaze range spans about 58 px of iris travel, so one
+              pixel of landmark wobble is roughly 33 px of cursor error. The green
+              outline should hug your iris and sit still when you hold a
+              fixation. If it shimmers, nothing downstream can be accurate.
+            </p>
+            <canvas id="eye-zoom" class="debug-canvas debug-canvas-eyes"></canvas>
+            <dl class="stats" id="zoom-stats"></dl>
+            <p class="hint" id="zoom-verdict">—</p>
+            <div class="row">
+              <button id="zoom-reset" class="btn btn-ghost btn-small">Reset measurement</button>
+            </div>
+          </div>
+
+          <!-- 2 — scope -->
+          <div class="debug-block">
+            <h3>2 · Signal scope — noise, lag, or a stuck clamp?</h3>
+            <p class="hint">
+              Red is what the model produced, blue is what the filter let
+              through. Fuzzy red = sensor noise. Blue trailing red = smoothing
+              lag. Flat blue while red moves = the fixation clamp is holding.
+              Green bands mark clamp holds, red ticks mark low-quality frames.
+            </p>
+            <div class="row">
+              <label class="field field-inline">
+                <span>Channel</span>
+                <select id="scope-channel">
+                  <option value="screen-x">Cursor X (raw vs filtered)</option>
+                  <option value="screen-y">Cursor Y (raw vs filtered)</option>
+                  <option value="features">Features (gx / gy)</option>
+                </select>
+              </label>
+              <label class="field field-inline">
+                <span>Window</span>
+                <select id="scope-window">
+                  <option value="5000">5 s</option>
+                  <option value="10000" selected>10 s</option>
+                  <option value="20000">20 s</option>
+                </select>
+              </label>
+            </div>
+            <canvas id="scope" class="debug-canvas debug-canvas-scope"></canvas>
+            <p class="hint" id="scope-lag">—</p>
+          </div>
+
+          <!-- 3 — validation -->
+          <div class="debug-block">
+            <h3>3 · Validation — how wrong is it, and where?</h3>
+            <p class="hint">
+              Tests the model at 13 points it was <em>not</em> calibrated on.
+              Arrows show systematic error (fixable by recalibrating); ellipses
+              show random scatter (not fixable by recalibrating). Takes about 25
+              seconds.
+            </p>
+            <div class="row">
+              <button id="val-start" class="btn">Run validation</button>
+              <button id="val-cancel" class="btn btn-ghost" hidden>Cancel</button>
+            </div>
+            <div id="val-progress" class="hint" hidden></div>
+            <canvas id="val-map" class="debug-canvas" hidden></canvas>
+            <div id="val-report" class="report" hidden></div>
+          </div>
+
+          <!-- 4 — probe -->
+          <div class="debug-block">
+            <h3>4 · Live probe — what changed since it last worked?</h3>
+            <p class="hint">
+              Parks a dot on screen and reports the offset live. Look at it, then
+              change one thing at a time — lean back, turn your head, dim the
+              light. Whatever makes the number jump is your culprit.
+            </p>
+            <div class="row">
+              <button id="probe-toggle" class="btn">Show probe dot</button>
+              <button id="probe-here" class="btn btn-ghost" hidden>Move to cursor</button>
+            </div>
+            <dl class="stats" id="probe-stats"></dl>
+          </div>
+
+          <!-- 5 — scatter -->
+          <div class="debug-block">
+            <h3>5 · Calibration scatter — was the fit ever possible?</h3>
+            <p class="hint">
+              Every calibration sample plotted in gaze-feature space, coloured by
+              target, with the fixation grid drawn as a mesh. A recognisable
+              (if skewed or mirrored) grid means the signal separated the
+              targets. Merged clusters mean it never did, and no amount of
+              refitting will help. Crossing mesh lines mean the mapping folds.
+              Hollow points were rejected as outliers; grey points are
+              head-motion targets, which overlap the grid by design and are
+              excluded from the numbers.
+            </p>
+            <p class="hint">
+              Both axes share one scale, so a short vertical band means the
+              vertical signal really is smaller — the eyelids crop the iris
+              exactly as you look up and down, which makes gy the harder axis.
+            </p>
+            <div class="row">
+              <button id="scatter-refresh" class="btn btn-ghost btn-small">Refresh</button>
+              <label class="check check-inline">
+                <input type="checkbox" id="scatter-head-motion" checked />
+                Show head-motion clusters
+              </label>
+            </div>
+            <div class="scatter-wrap">
+              <canvas id="scatter" class="debug-canvas debug-canvas-scatter"></canvas>
+            </div>
+            <dl class="stats" id="scatter-stats"></dl>
+            <p class="hint" id="scatter-verdict">Run a calibration to populate this.</p>
+          </div>
+
+          <!-- 6 — pose drift -->
+          <div class="debug-block">
+            <h3>6 · Pose drift — how far from where you calibrated?</h3>
+            <p class="hint">
+              Per-axis distance from your calibration pose, in standard
+              deviations. Past ~3σ on any axis the model is extrapolating and
+              accuracy degrades. This is usually the answer to "it worked a
+              minute ago".
+            </p>
+            <div id="pose-axes" class="pose-axes"></div>
+          </div>
+        </details>
+      </section>
     </main>
 
     <script type="module" src="./control/main.ts"></script>

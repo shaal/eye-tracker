@@ -22,6 +22,8 @@ let settings: Settings = loadSettings();
 let shortcutRegistered = false;
 let lastHudAt = 0;
 let clickPulseUntil = 0;
+/** Reference dot for the continuous accuracy probe (debug mode 4). */
+let probePoint: Point | null = null;
 
 let vision: VisionStatus = {
   cameraReady: false,
@@ -54,6 +56,7 @@ function send(win: BrowserWindow | null, channel: string, payload: unknown): voi
 
 const IDLE_ENGINE_STATE: EngineFrameState = {
   hasGaze: false,
+  quality: 0,
   x: 0,
   y: 0,
   rawX: 0,
@@ -102,6 +105,11 @@ function buildStatus(): AppStatus {
 function registerShortcut(): void {
   globalShortcut.unregisterAll();
   shortcutRegistered = false;
+  // `unregisterAll` also drops the modal calibration keys. Forget the flags so
+  // the re-apply below actually re-registers rather than short-circuiting on a
+  // stale "already active".
+  cancelKeysActive = false;
+  skipKeysActive = false;
   try {
     shortcutRegistered = globalShortcut.register(settings.shortcut, () => {
       const next = !(bridge?.controlEnabled ?? false);
@@ -129,6 +137,129 @@ function registerShortcut(): void {
     );
     bridge?.setControlEnabled(false);
   }
+
+  // Restore the modal keys if a run is on screen right now — changing the
+  // kill-switch binding mid-calibration must not strip Escape.
+  if (bridge?.calibrationUi.active || bridge?.validating) setCancelKeys(true);
+  if (bridge?.calibrationUi.phase === 'instruct') setSkipKeys(true);
+}
+
+// ---------------------------------------------------------------------------
+// Modal calibration/validation keys
+//
+// These have to be *global* shortcuts. During a run the user is looking at a
+// full-screen overlay while keyboard focus is wherever it happened to be, and
+// the overlay itself is deliberately `focusable: false` so it never steals
+// focus (ADR-0002) — so a renderer keydown handler in either window would only
+// work by luck.
+//
+// Grabbing Space/Return/Escape system-wide is only acceptable because a
+// calibration run is a modal takeover with a hard end: they are registered when
+// one starts and released the moment it stops.
+// ---------------------------------------------------------------------------
+
+/**
+ * Escape is held for the whole run; the skip keys only while a card is up.
+ *
+ * The split is deliberate. Escape needs to work at any moment — that is the
+ * point of a bail-out. Space and Return, however, are ordinary keys that other
+ * apps want, so they are grabbed for the few seconds a card is actually on
+ * screen rather than for the whole forty-second run.
+ */
+const CANCEL_KEYS = ['Escape'] as const;
+const SKIP_KEYS = ['Space', 'Return'] as const;
+
+let cancelKeysActive = false;
+let skipKeysActive = false;
+
+function grab(keys: readonly string[], on: boolean, handler: () => void): void {
+  for (const key of keys) {
+    // Never touch the kill-switch binding. If the user has bound control toggle
+    // to Escape or Space, grabbing it here would replace their registration for
+    // the run and then *unregister it outright* on release — leaving no kill
+    // switch while `shortcutRegistered` still claims there is one. That is
+    // exactly the fail-open state ADR-0011 exists to prevent, and losing a
+    // convenience key is a trivial price beside it.
+    if (key === settings.shortcut) {
+      console.warn(
+        `[shortcut] "${key}" is the kill switch — not grabbing it for calibration`,
+      );
+      continue;
+    }
+    if (!on) {
+      globalShortcut.unregister(key);
+      continue;
+    }
+    try {
+      if (!globalShortcut.register(key, handler)) {
+        console.warn(`[shortcut] "${key}" is held by another app — unavailable this run`);
+      }
+    } catch (err) {
+      // Non-fatal by design: the card still advances on its own timer, so a key
+      // we cannot grab costs convenience, not the ability to calibrate.
+      console.warn(`[shortcut] could not register "${key}":`, err);
+    }
+  }
+}
+
+function setCancelKeys(on: boolean): void {
+  if (on === cancelKeysActive) return;
+  cancelKeysActive = on;
+  grab(CANCEL_KEYS, on, () => {
+    // Escape means "get me out of this", so it applies to whichever modal run
+    // is on screen. Cancelling only one of them would be a trap.
+    bridge?.cancelCalibration();
+    bridge?.cancelValidation();
+    pushStatus(true);
+  });
+}
+
+function setSkipKeys(on: boolean): void {
+  if (on === skipKeysActive) return;
+  skipKeysActive = on;
+  grab(SKIP_KEYS, on, () => bridge?.skipInstruction());
+}
+
+/**
+ * Let the overlay receive clicks — used only while an instruction card is up.
+ *
+ * This is the single most dangerous flag in the app. The overlay spans the
+ * entire desktop, so while it is not click-through **nothing on the machine is
+ * clickable**. It is therefore driven from exactly one place (the calibration
+ * emit path, below), so that cancelling, finishing, or erroring all revert it
+ * without needing to remember to — plus the watchdog below as a second net.
+ */
+let overlayInteractive = false;
+let overlayInteractiveGuard: NodeJS.Timeout | null = null;
+
+function setOverlayInteractive(on: boolean): void {
+  // Both early returns come BEFORE the timer is touched, and that ordering is
+  // load-bearing. Clearing first meant a redundant `true` call — any duplicate
+  // emit while already in the 'instruct' phase — disarmed the watchdog and then
+  // returned without re-arming it, leaving the "desktop nobody can click" case
+  // with no recovery at all. The net was being cancelled by the very state it
+  // exists to protect.
+  if (on === overlayInteractive) return;
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+
+  if (overlayInteractiveGuard) {
+    clearTimeout(overlayInteractiveGuard);
+    overlayInteractiveGuard = null;
+  }
+
+  overlayInteractive = on;
+  if (on) {
+    overlayWindow.setIgnoreMouseEvents(false);
+    // Belt and braces: an instruction card lasts at most 7 s, so if we are
+    // still interactive well past that, something went wrong upstream and a
+    // desktop the user cannot click is much worse than a missed skip.
+    overlayInteractiveGuard = setTimeout(() => {
+      console.warn('[overlay] click-through was not restored in time — forcing it');
+      setOverlayInteractive(false);
+    }, 12_000);
+  } else {
+    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  }
 }
 
 function pushStatus(force = false): void {
@@ -154,6 +285,9 @@ function pushOverlay(): void {
     clamped: s.clamped,
     clickPulse: Date.now() < clickPulseUntil ? 1 : 0,
     guardReason: s.guardReason,
+    probeVisible: probePoint !== null,
+    probeX: probePoint?.x ?? 0,
+    probeY: probePoint?.y ?? 0,
   });
 }
 
@@ -226,6 +360,61 @@ function wireIpc(): void {
     pushStatus(true);
   });
 
+  /** Dismiss an instruction card early. No-op in any other phase. */
+  ipcMain.handle('calibration:skipInstruction', () => {
+    bridge?.skipInstruction();
+  });
+
+  // --- validation: measures the model, never modifies it ---
+  ipcMain.handle('validation:start', () => {
+    const targets = bridge?.startValidation() ?? [];
+    pushStatus(true);
+    return targets;
+  });
+
+  ipcMain.handle('validation:finish', () => {
+    const report = bridge?.finishValidation();
+    pushStatus(true);
+    return report;
+  });
+
+  ipcMain.handle('validation:cancel', () => {
+    bridge?.cancelValidation();
+    pushStatus(true);
+  });
+
+  // --- debug probes ---
+  ipcMain.handle('debug:scatter', () => bridge?.calibrationScatter() ?? { points: [], gridCount: 0 });
+
+  ipcMain.handle('debug:calibration', () => bridge?.calibrationProfile() ?? null);
+
+  /** Work area of the primary display — the frame the debug error map draws in. */
+  ipcMain.handle('debug:bounds', () => screen.getPrimaryDisplay().workArea);
+
+  /**
+   * Park the probe dot at a screen point, or pass nothing to hide it. Defaults
+   * to the centre of the primary display, which is the least biased place to
+   * measure from.
+   */
+  ipcMain.handle('debug:setProbe', (_e, at?: Point | null) => {
+    if (at === null) {
+      probePoint = null;
+    } else if (at === undefined) {
+      const b = screen.getPrimaryDisplay().workArea;
+      probePoint = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    } else {
+      probePoint = at;
+    }
+    pushOverlay();
+    return probePoint;
+  });
+
+  ipcMain.handle('debug:sensitivity', (_e, frame: Float64Array | ArrayBufferLike) => {
+    const f =
+      frame instanceof Float64Array ? frame : new Float64Array(frame as ArrayBufferLike);
+    return bridge?.gazeSensitivity(f);
+  });
+
   ipcMain.handle('tuning:set', (_e, patch: TuningPatch) => {
     bridge?.setTuning(patch);
     settings = { ...settings, tuning: mergeTuning(settings.tuning, patch) };
@@ -277,6 +466,22 @@ app.whenReady().then(() => {
   bridge?.onCalibration((ui: CalibrationUi) => {
     send(overlayWindow, 'calibration:ui', ui);
     send(controlWindow, 'calibration:ui', ui);
+
+    // Derived from state rather than set at each call site: every way a run can
+    // end — finishing, cancelling, Escape, a failed fit — goes through here, so
+    // none of them can forget to release the keys or restore click-through.
+    const instructing = ui.active && ui.phase === 'instruct';
+    setCancelKeys(ui.active || (bridge?.validating ?? false));
+    setSkipKeys(instructing);
+    setOverlayInteractive(instructing);
+  });
+
+  bridge?.onValidation((ui) => {
+    send(overlayWindow, 'validation:ui', ui);
+    send(controlWindow, 'validation:ui', ui);
+    // Validation has no instruction cards, so it wants Escape but neither the
+    // skip keys nor click-through.
+    setCancelKeys(ui.active || (bridge?.calibrationUi.active ?? false));
   });
 
   wireIpc();
@@ -313,6 +518,9 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // Restore click-through before tearing down, in case we are quitting while an
+  // instruction card happens to be up.
+  setOverlayInteractive(false);
   bridge?.dispose();
 });
 

@@ -1,11 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AppStatus,
+  CalibrationProfile,
   CalibrationReport,
+  CalibrationScatter,
   CalibrationUiState,
+  GazeSensitivity,
   OverlayState,
   Point,
+  ScreenBounds,
   TuningPatch,
+  ValidationReport,
+  ValidationUiState,
   VisionStatus,
 } from '@eye-tracker/core';
 
@@ -38,6 +44,12 @@ const api = {
     ipcRenderer.invoke('calibration:start', points, headMotion),
   finishCalibration: (): Promise<CalibrationReport> => ipcRenderer.invoke('calibration:finish'),
   cancelCalibration: (): Promise<void> => ipcRenderer.invoke('calibration:cancel'),
+  /** Dismiss an instruction card early. Ignored outside the 'instruct' phase. */
+  skipInstruction: (): Promise<void> => ipcRenderer.invoke('calibration:skipInstruction'),
+
+  startValidation: (): Promise<Point[]> => ipcRenderer.invoke('validation:start'),
+  finishValidation: (): Promise<ValidationReport> => ipcRenderer.invoke('validation:finish'),
+  cancelValidation: (): Promise<void> => ipcRenderer.invoke('validation:cancel'),
 
   setTuning: (patch: TuningPatch): Promise<Record<string, number | boolean | string>> =>
     ipcRenderer.invoke('tuning:set', patch),
@@ -51,6 +63,26 @@ const api = {
   debugMoveCursor: (x: number, y: number): Promise<void> =>
     ipcRenderer.invoke('debug:moveCursor', x, y),
   debugClick: (count: number): Promise<void> => ipcRenderer.invoke('debug:click', count),
+
+  /** Calibration samples in gaze-feature space, for the scatter plot. */
+  getCalibrationScatter: (): Promise<CalibrationScatter> => ipcRenderer.invoke('debug:scatter'),
+  /**
+   * Screen pixels per unit of iris offset, probed about the supplied live
+   * frame. This is what converts raw feature jitter into a cursor-noise figure.
+   */
+  getGazeSensitivity: (frame: Float64Array): Promise<GazeSensitivity> =>
+    ipcRenderer.invoke('debug:sensitivity', frame),
+  /** Work area of the primary display, so the debug map can draw to scale. */
+  getDisplayBounds: (): Promise<ScreenBounds> => ipcRenderer.invoke('debug:bounds'),
+  /** The loaded model, for the per-axis pose-drift breakdown. */
+  getCalibrationProfile: (): Promise<CalibrationProfile | null> =>
+    ipcRenderer.invoke('debug:calibration'),
+  /**
+   * Park the continuous-probe dot. `null` hides it; omitting the argument puts
+   * it at the centre of the primary display.
+   */
+  setProbePoint: (at?: Point | null): Promise<Point | null> =>
+    ipcRenderer.invoke('debug:setProbe', at),
 
   // --- subscriptions ---
   onStatus(cb: (s: AppStatus) => void): () => void {
@@ -67,6 +99,11 @@ const api = {
     const h = (_e: unknown, s: CalibrationUiState) => cb(s);
     ipcRenderer.on('calibration:ui', h);
     return () => ipcRenderer.removeListener('calibration:ui', h);
+  },
+  onValidationUi(cb: (s: ValidationUiState) => void): () => void {
+    const h = (_e: unknown, s: ValidationUiState) => cb(s);
+    ipcRenderer.on('validation:ui', h);
+    return () => ipcRenderer.removeListener('validation:ui', h);
   },
   onNotice(cb: (n: { level: string; message: string }) => void): () => void {
     const h = (_e: unknown, n: { level: string; message: string }) => cb(n);

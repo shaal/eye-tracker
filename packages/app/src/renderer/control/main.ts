@@ -7,14 +7,29 @@ import {
   CLICK_MODE_LABELS,
   EYE_A,
   EYE_B,
+  HEAD_MOTION_STEPS,
+  poseDriftPerAxis,
+  scatterAdvice,
+  summarizeScatter,
+  totalDurationMs,
+  validationDurationMs,
   type AppStatus,
+  type CalibrationProfile,
   type ClickMode,
   type GazeFeatures,
+  type Landmark,
   type TuningPatch,
+  type ValidationReport,
 } from '@eye-tracker/core';
 import { VisionLoop, listCameras } from './vision.js';
 import { drawDebugOverlay } from './debug-draw.js';
 import { SLIDERS, buildSliders } from './tuning-ui.js';
+import { SignalStats } from './debug/signal-stats.js';
+import { drawEyeZoom, eyeZoomReadout } from './debug/eye-zoom.js';
+import { Scope, type ScopeChannel } from './debug/scope.js';
+import { drawValidationMap } from './debug/validation-view.js';
+import { drawScatter } from './debug/scatter.js';
+import { AccuracyProbe } from './debug/probe.js';
 
 function $<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -36,6 +51,61 @@ const meter = (id: string, frac: number) => {
 };
 
 let latestFeatures: GazeFeatures | null = null;
+
+/**
+ * Snapshot of just the landmarks the eye-zoom view draws.
+ *
+ * MediaPipe owns the array it hands to `onFrame` and may reuse it, but the draw
+ * loop runs on its own animation-frame clock and reads whatever is stored here
+ * — so holding the original risks rendering coordinates from a *later* frame
+ * than the `GazeFeatures` drawn alongside them, which would show a landmark
+ * overlay that disagrees with its own numbers.
+ *
+ * Only the ~26 indices the view actually uses are copied, into objects
+ * allocated once, so the steady-state cost is 26 float writes per frame rather
+ * than a 478-element clone.
+ */
+const ZOOM_INDICES: readonly number[] = [
+  ...new Set([
+    ...EYE_A.corners,
+    EYE_A.irisCenter,
+    ...EYE_A.irisRim,
+    ...EYE_A.ear,
+    ...EYE_B.corners,
+    EYE_B.irisCenter,
+    ...EYE_B.irisRim,
+    ...EYE_B.ear,
+  ]),
+];
+
+/** Sparse, indexed to match MediaPipe's numbering so the drawing code is unchanged. */
+const landmarkSnapshot: Landmark[] = [];
+for (const i of ZOOM_INDICES) landmarkSnapshot[i] = { x: 0, y: 0, z: 0 };
+
+let latestLandmarks: readonly Landmark[] | null = null;
+
+function snapshotLandmarks(source: readonly Landmark[] | null): readonly Landmark[] | null {
+  if (!source) return null;
+  for (const i of ZOOM_INDICES) {
+    const src = source[i];
+    const dst = landmarkSnapshot[i];
+    if (!src || !dst) continue;
+    dst.x = src.x;
+    dst.y = src.y;
+    dst.z = src.z;
+  }
+  return landmarkSnapshot;
+}
+
+/**
+ * Newest packed frame, for probing the model's local gain.
+ *
+ * Unlike the landmarks above this is *deliberately* the live reused buffer.
+ * The sensitivity probe runs on a one-second timer and wants the pose the user
+ * is in right now, not the one they were in when the timer was armed; the
+ * buffer is serialised at `invoke` time, so there is no tearing.
+ */
+let latestFrame: Float64Array | null = null;
 let cameraFps = 0;
 let lastFrameAt = 0;
 let controlEnabled = false;
@@ -88,8 +158,17 @@ function clearBanner(id: string): void {
 // ---------------------------------------------------------------------------
 
 const vision = new VisionLoop(video, {
-  onFrame(frame, features, inferenceMs) {
+  onFrame(frame, features, inferenceMs, landmarks) {
     latestFeatures = features;
+    // Copied, not retained: the array belongs to MediaPipe and the draw loop
+    // reads it on a different clock (see `snapshotLandmarks`).
+    latestLandmarks = snapshotLandmarks(landmarks);
+    latestFrame = frame;
+
+    // Feed the noise-floor estimate only when there is a real measurement to
+    // feed it. Zeros from a lost face would read as a perfectly quiet signal
+    // and make the tracker look far better than it is.
+    if (features.ok) signalStats.push(features.gx, features.gy, features.dgx);
 
     const now = performance.now();
     if (lastFrameAt > 0) {
@@ -193,10 +272,56 @@ cameraSelect.addEventListener('change', async () => {
 // throttle inference.
 // ---------------------------------------------------------------------------
 
+const signalStats = new SignalStats();
+const scope = new Scope();
+const probe = new AccuracyProbe();
+
+const debugPanel = $<HTMLDetailsElement>('debug-panel');
+const eyeZoomCanvas = $<HTMLCanvasElement>('eye-zoom');
+const scopeCanvas = $<HTMLCanvasElement>('scope');
+const scatterCanvas = $<HTMLCanvasElement>('scatter');
+const valMapCanvas = $<HTMLCanvasElement>('val-map');
+const scopeChannel = $<HTMLSelectElement>('scope-channel');
+const scopeWindow = $<HTMLSelectElement>('scope-window');
+
+/**
+ * Screen px per unit of iris offset. Refreshed on a slow timer rather than per
+ * frame: it changes only with head pose, each probe is four IPC round trips,
+ * and this figure is read by a human at reading speed.
+ */
+let sensitivity = { pxPerGx: Number.NaN, pxPerGy: Number.NaN };
+let lastValidationReport: ValidationReport | null = null;
+let calibrationProfile: CalibrationProfile | null = null;
+
+/**
+ * The signal summary for this animation frame.
+ *
+ * Recomputed once per frame and shared: it sorts a 300-entry history, and the
+ * draw loop and the status handler both want it, on different clocks. Computing
+ * it in each would sort well over a hundred times a second for a number a human
+ * reads a few times a minute.
+ */
+let frameSummary = signalStats.summary();
+
 function drawLoop(): void {
   requestAnimationFrame(drawLoop);
   if (!latestFeatures) return;
   drawDebugOverlay(debugCanvas, video, latestFeatures, { EYE_A, EYE_B });
+
+  // Everything below is inside a collapsed <details> most of the time. Skipping
+  // it while closed keeps the debug views from costing anything in normal use.
+  if (!debugPanel.open) return;
+
+  frameSummary = signalStats.summary();
+  drawEyeZoom(eyeZoomCanvas, video, {
+    features: latestFeatures,
+    landmarks: latestLandmarks,
+    summary: frameSummary,
+    pxPerGx: sensitivity.pxPerGx,
+    pxPerGy: sensitivity.pxPerGy,
+  });
+
+  scope.draw(scopeCanvas, scopeChannel.value as ScopeChannel, Number(scopeWindow.value));
 }
 drawLoop();
 
@@ -247,6 +372,25 @@ window.eyeTracker.onStatus((s: AppStatus) => {
     text('s-gaze', `${f.gx.toFixed(3)}, ${f.gy.toFixed(3)}`);
     text('s-head', `${deg(f.yaw)}° / ${deg(f.pitch)}° / ${deg(f.roll)}°`);
   }
+
+  // The scope samples from the status stream rather than the vision loop,
+  // because raw-vs-filtered is a property of the engine and only main has both.
+  if (e.hasGaze) {
+    scope.push({
+      t: performance.now(),
+      gx: latestFeatures?.gx ?? 0,
+      gy: latestFeatures?.gy ?? 0,
+      rawX: e.rawX,
+      rawY: e.rawY,
+      x: e.x,
+      y: e.y,
+      clamped: e.clamped,
+      quality: e.quality,
+    });
+    probe.push(e.rawX, e.rawY);
+  }
+
+  if (debugPanel.open) updateDebugReadouts(e);
 
   if (e.calibrated && !e.headCompensated) {
     setBanner({
@@ -363,7 +507,10 @@ async function runCalibration(points: 5 | 9): Promise<void> {
   calReport.hidden = true;
   calCancel.hidden = false;
   calProgress.hidden = false;
-  calProgress.textContent = 'Starting…';
+  const seconds = Math.round(
+    totalDurationMs(points, optHeadMotion.checked ? HEAD_MOTION_STEPS.length : 0) / 1000,
+  );
+  calProgress.textContent = `Starting… about ${seconds}s`;
   await window.eyeTracker.startCalibration(points, optHeadMotion.checked);
 }
 
@@ -407,7 +554,16 @@ window.eyeTracker.onCalibrationUi(async (c) => {
           report.meanErrorDeg >= 2.5
             ? '<div class="hint warn">Try again: sit squarely, keep the room evenly lit, and look directly at each dot.</div>'
             : ''
-        }`;
+        }
+        <div class="hint">Open <b>Debug &amp; diagnostics → Validation</b> to measure this at points
+          the model was not fitted to — the number above only scores the dots you just looked at.</div>`;
+
+      // Both the scatter and the pose baseline belong to the run that just
+      // finished; the debug panel would otherwise show the previous one.
+      if (debugPanel.open) {
+        await refreshScatter();
+        await refreshSlowDebug();
+      }
     } catch (err) {
       calProgress.hidden = true;
       setBanner({
@@ -419,8 +575,15 @@ window.eyeTracker.onCalibrationUi(async (c) => {
     return;
   }
 
+  if (c.phase === 'instruct') {
+    // Naming the card explicitly keeps the pause from reading as a stall — the
+    // control window is often on a second display where the card is not visible.
+    calProgress.textContent = `“${c.title}” — click or press Space to start now, Esc to cancel`;
+    return;
+  }
+
   const label = c.headMotion ? 'head motion' : c.phase;
-  calProgress.textContent = `Point ${c.currentIndex + 1} of ${c.targets.length} — ${label}`;
+  calProgress.textContent = `Point ${c.currentIndex + 1} of ${c.targets.length} — ${label} · Esc to cancel`;
 });
 
 // --- behaviour toggles ---
@@ -440,6 +603,372 @@ optOverlay.addEventListener('change', () => {
 
 $('dbg-click').addEventListener('click', () => void window.eyeTracker.debugClick(1));
 $('dbg-dblclick').addEventListener('click', () => void window.eyeTracker.debugClick(2));
+
+// ---------------------------------------------------------------------------
+// Debug panel
+// ---------------------------------------------------------------------------
+
+const zoomStats = $<HTMLDListElement>('zoom-stats');
+const probeStats = $<HTMLDListElement>('probe-stats');
+const poseAxes = $<HTMLDivElement>('pose-axes');
+
+/** Render a `<dl class="stats">` from rows, colouring the value by verdict. */
+function renderStats(
+  into: HTMLElement,
+  rows: ReadonlyArray<[string, string, 'good' | 'warn' | 'bad' | 'plain']>,
+): void {
+  into.replaceChildren();
+  for (const [label, value, level] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    if (level !== 'plain') dd.className = level;
+    into.append(dt, dd);
+  }
+}
+
+function updateDebugReadouts(e: AppStatus['engine']): void {
+  if (latestFeatures) {
+    const readout = eyeZoomReadout({
+      features: latestFeatures,
+      landmarks: latestLandmarks,
+      summary: frameSummary,
+      pxPerGx: sensitivity.pxPerGx,
+      pxPerGy: sensitivity.pxPerGy,
+    });
+    renderStats(zoomStats, readout.rows);
+    text('zoom-verdict', readout.verdict);
+  }
+
+  const lag = scope.estimateLagMs();
+  text(
+    'scope-lag',
+    Number.isFinite(lag)
+      ? `Smoothing lag ≈ ${lag.toFixed(0)} ms${lag > 120 ? ' — high; lower minCutoff’s effect by raising beta, or reduce the median window' : ''}`
+      : 'Smoothing lag: move your gaze around for a few seconds to measure it.',
+  );
+
+  updateProbeReadout();
+  updatePoseAxes(e);
+}
+
+// --- 4 · live probe ---
+
+const probeToggle = $<HTMLButtonElement>('probe-toggle');
+const probeHere = $<HTMLButtonElement>('probe-here');
+
+function updateProbeReadout(): void {
+  if (!probe.targetPoint) {
+    renderStats(probeStats, [['Probe', 'off', 'plain']]);
+    return;
+  }
+  const r = probe.read();
+  if (r.samples < 10) {
+    renderStats(probeStats, [['Probe', `collecting… (${r.samples})`, 'plain']]);
+    return;
+  }
+
+  // Only available once a validation run has told us the px-per-degree scale.
+  const asDegrees = (px: number) =>
+    lastValidationReport && lastValidationReport.pxPerDegree > 0
+      ? ` (${(px / lastValidationReport.pxPerDegree).toFixed(2)}°)`
+      : '';
+
+  renderStats(probeStats, [
+    [
+      'Offset',
+      `${r.accuracyPx.toFixed(0)} px${asDegrees(r.accuracyPx)} — ${r.direction}`,
+      r.accuracyPx < 40 ? 'good' : r.accuracyPx < 100 ? 'warn' : 'bad',
+    ],
+    ['Components', `x ${r.offsetX.toFixed(0)}  y ${r.offsetY.toFixed(0)}`, 'plain'],
+    [
+      'Scatter',
+      `±${r.precisionPx.toFixed(0)} px`,
+      r.precisionPx < 30 ? 'good' : r.precisionPx < 70 ? 'warn' : 'bad',
+    ],
+  ]);
+}
+
+probeToggle.addEventListener('click', async () => {
+  if (probe.targetPoint) {
+    await window.eyeTracker.setProbePoint(null);
+    probe.setTarget(null);
+    probeToggle.textContent = 'Show probe dot';
+    probeHere.hidden = true;
+  } else {
+    const at = await window.eyeTracker.setProbePoint();
+    probe.setTarget(at);
+    probeToggle.textContent = 'Hide probe dot';
+    probeHere.hidden = false;
+  }
+  updateProbeReadout();
+});
+
+probeHere.addEventListener('click', async () => {
+  // Re-parking resets the window: the old samples were taken against a
+  // different reference point and averaging across the move would be wrong.
+  const at = await window.eyeTracker.setProbePoint();
+  probe.setTarget(at);
+  updateProbeReadout();
+});
+
+// --- 6 · pose drift ---
+
+function updatePoseAxes(e: AppStatus['engine']): void {
+  if (!e.calibrated || !calibrationProfile || !latestFeatures) {
+    poseAxes.replaceChildren();
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = e.calibrated
+      ? 'Loading calibration…'
+      : 'Calibrate first — drift is measured against the pose you calibrated in.';
+    poseAxes.append(p);
+    return;
+  }
+
+  const f = latestFeatures;
+  const pose = [f.yaw, f.pitch, f.roll, f.hx, f.hy, f.hz];
+  const drifts = poseDriftPerAxis(pose, calibrationProfile.poseMean, calibrationProfile.poseStd);
+
+  poseAxes.replaceChildren();
+  for (const d of drifts) {
+    const row = document.createElement('div');
+    row.className = 'pose-axis';
+
+    const label = document.createElement('span');
+    label.textContent = d.label;
+
+    const bar = document.createElement('div');
+    bar.className = 'pose-bar';
+    const fill = document.createElement('div');
+    // The bar tops out at 5σ, with the 3σ extrapolation mark drawn at 60%.
+    fill.className = `pose-fill${d.sigma > 3 ? ' bad' : d.sigma > 2 ? ' warn' : ''}`;
+    fill.style.width = `${Math.min(100, (d.sigma / 5) * 100)}%`;
+    bar.append(fill);
+
+    const value = document.createElement('span');
+    value.className = 'value';
+    const human =
+      d.unit === 'deg'
+        ? `${((d.delta * 180) / Math.PI).toFixed(0)}°`
+        : d.unit === 'inv'
+          ? `${d.delta > 0 ? 'nearer' : 'further'}`
+          : `${(d.delta * 100).toFixed(0)}%`;
+    value.textContent = `${d.sigma.toFixed(1)}σ ${human}`;
+
+    row.append(label, bar, value);
+    poseAxes.append(row);
+  }
+}
+
+// --- 1 · eye zoom controls ---
+
+$('zoom-reset').addEventListener('click', () => {
+  signalStats.reset();
+  scope.clear();
+});
+
+// --- 3 · validation ---
+
+const valStart = $<HTMLButtonElement>('val-start');
+const valCancel = $<HTMLButtonElement>('val-cancel');
+const valProgress = $<HTMLDivElement>('val-progress');
+const valReport = $<HTMLDivElement>('val-report');
+
+valStart.addEventListener('click', async () => {
+  valReport.hidden = true;
+  valMapCanvas.hidden = true;
+  // Disabled before the round trip, not after: awaiting first leaves the button
+  // live long enough for a double click to start two runs, and the second would
+  // reset the sample buckets the first is still filling.
+  valStart.disabled = true;
+
+  const targets = await window.eyeTracker.startValidation();
+  if (targets.length === 0) {
+    valStart.disabled = false;
+    setBanner({
+      id: 'val-uncalibrated',
+      level: 'warn',
+      message: 'Calibrate before validating — there is no model to measure yet.',
+    });
+    return;
+  }
+  clearBanner('val-uncalibrated');
+  valCancel.hidden = false;
+  valProgress.hidden = false;
+  valProgress.textContent = `Starting… about ${Math.round(validationDurationMs() / 1000)}s`;
+});
+
+valCancel.addEventListener('click', () => {
+  void window.eyeTracker.cancelValidation();
+  valStart.disabled = false;
+  valCancel.hidden = true;
+  valProgress.hidden = true;
+});
+
+window.eyeTracker.onValidationUi(async (v) => {
+  if (!v.active && v.phase !== 'done') {
+    valStart.disabled = false;
+    valCancel.hidden = true;
+    valProgress.hidden = true;
+    return;
+  }
+
+  if (v.phase === 'done') {
+    valProgress.textContent = 'Scoring…';
+    try {
+      const report = await window.eyeTracker.finishValidation();
+      lastValidationReport = report;
+      renderValidationReport(report);
+    } catch (err) {
+      setBanner({
+        id: 'val-fail',
+        level: 'error',
+        message: `Validation failed: ${(err as Error).message}`,
+      });
+    } finally {
+      valStart.disabled = false;
+      valCancel.hidden = true;
+      valProgress.hidden = true;
+    }
+    return;
+  }
+
+  valProgress.textContent = `Point ${v.currentIndex + 1} of ${v.targets.length} — ${v.phase}`;
+});
+
+function renderValidationReport(report: ValidationReport): void {
+  valReport.hidden = false;
+  valMapCanvas.hidden = false;
+
+  const bounds = probeBounds ?? { x: 0, y: 0, width: 1920, height: 1080 };
+  drawValidationMap(valMapCanvas, report, bounds);
+
+  const worst = report.targets[report.worstIndex];
+  // 'unknown' means the run could not be graded, which is not the same as being
+  // graded badly — it gets no colour rather than the failure colour.
+  const cls = (v: string) =>
+    v === 'good' ? 'good' : v === 'usable' ? 'warn' : v === 'poor' ? 'bad' : '';
+  const px = (v: number) => (Number.isFinite(v) ? v.toFixed(0) : '—');
+  const dg = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : '—');
+
+  // Accuracy and precision are shown side by side, never summed: the whole
+  // point of the run is that they lead to different fixes.
+  valReport.innerHTML = `
+    <strong>Validated on ${report.targets.length} fresh points</strong>
+    <div>Accuracy (systematic): <b class="${cls(report.accuracyVerdict)}">${px(report.meanAccuracyPx)} px</b>
+      — ${dg(report.meanAccuracyDeg)}°, worst point ${px(report.p95AccuracyPx)} px</div>
+    <div>Precision (random): <b class="${cls(report.precisionVerdict)}">±${px(report.meanPrecisionPx)} px</b>
+      — ${dg(report.meanPrecisionDeg)}°</div>
+    <div class="hint">After smoothing the cursor scatters ±${px(report.meanFilteredPrecisionPx)} px${
+      Number.isFinite(report.meanFilteredPrecisionPx) && Number.isFinite(report.meanPrecisionPx)
+        ? ` (${((1 - report.meanFilteredPrecisionPx / report.meanPrecisionPx) * 100).toFixed(0)}% of the jitter removed by the filter)`
+        : ''
+    }.</div>
+    ${
+      worst
+        ? `<div class="hint">Worst point: ${px(worst.target.x)},${px(worst.target.y)} — off by ${px(worst.accuracyPx)} px.</div>`
+        : ''
+    }
+    ${report.dropped > 0 ? `<div class="hint warn">${report.dropped} point(s) dropped for too few usable samples — tracking was lost there.</div>` : ''}
+    <div class="hint">${report.advice}</div>`;
+}
+
+// --- 5 · calibration scatter ---
+
+const scatterStats = $<HTMLDListElement>('scatter-stats');
+const scatterHeadMotion = $<HTMLInputElement>('scatter-head-motion');
+
+async function refreshScatter(): Promise<void> {
+  const { points, gridCount } = await window.eyeTracker.getCalibrationScatter();
+  const s = summarizeScatter(points, gridCount);
+
+  drawScatter(scatterCanvas, points, s, {
+    showHeadMotion: scatterHeadMotion.checked,
+    gridCount,
+  });
+
+  if (points.length === 0) {
+    renderStats(scatterStats, [['Scatter', 'no calibration samples yet', 'plain']]);
+    text('scatter-verdict', 'Run a calibration to populate this.');
+    return;
+  }
+
+  const band = (v: number): 'good' | 'warn' | 'bad' | 'plain' =>
+    !Number.isFinite(v) ? 'plain' : v >= 3 ? 'good' : v >= 1.5 ? 'warn' : 'bad';
+  const num = (v: number, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '—');
+
+  // Per axis, because horizontal and vertical separability fail for different
+  // reasons and imply different fixes.
+  renderStats(scatterStats, [
+    [
+      'Horizontal (gx)',
+      `${num(s.x.ratio)}× — gap ${num(s.x.separation, 3)} vs spread ${num(s.x.spread, 3)}`,
+      band(s.x.ratio),
+    ],
+    [
+      'Vertical (gy)',
+      `${num(s.y.ratio)}× — gap ${num(s.y.separation, 3)} vs spread ${num(s.y.spread, 3)}`,
+      band(s.y.ratio),
+    ],
+    [
+      'Vertical vs horizontal',
+      `gy range is ${
+        Number.isFinite(s.y.range / s.x.range) ? ((s.y.range / s.x.range) * 100).toFixed(0) : '—'
+      }% of gx range`,
+      s.y.range / s.x.range < 0.4 ? 'warn' : 'plain',
+    ],
+    [
+      'Grid order',
+      s.x.monotonic && s.y.monotonic ? 'intact' : 'FOLDED — clusters out of order',
+      s.x.monotonic && s.y.monotonic ? 'good' : 'bad',
+    ],
+    [
+      'Clusters',
+      `${s.gridClusters} fixation` +
+        (s.headMotionClusters > 0 ? ` + ${s.headMotionClusters} head-motion (excluded)` : ''),
+      'plain',
+    ],
+    [
+      'Outliers rejected',
+      `${s.rejected} of ${s.total} (${((s.rejected / Math.max(1, s.total)) * 100).toFixed(0)}%)`,
+      s.rejected / Math.max(1, s.total) > 0.25 ? 'warn' : 'plain',
+    ],
+  ]);
+
+  text('scatter-verdict', scatterAdvice(s));
+}
+
+$('scatter-refresh').addEventListener('click', () => void refreshScatter());
+scatterHeadMotion.addEventListener('change', () => void refreshScatter());
+
+/** Work-area bounds of the primary display, for drawing the error map to scale. */
+let probeBounds: { x: number; y: number; width: number; height: number } | null = null;
+
+/**
+ * Refresh the slow-moving debug inputs.
+ *
+ * All three are read by a human at reading speed and cost an IPC round trip, so
+ * polling them at frame rate would be pure waste.
+ */
+async function refreshSlowDebug(): Promise<void> {
+  if (!debugPanel.open) return;
+  if (latestFrame) {
+    const s = await window.eyeTracker.getGazeSensitivity(latestFrame);
+    if (s?.calibrated) sensitivity = { pxPerGx: s.pxPerGx, pxPerGy: s.pxPerGy };
+  }
+  calibrationProfile = await window.eyeTracker.getCalibrationProfile();
+  probeBounds ??= await window.eyeTracker.getDisplayBounds();
+}
+
+setInterval(() => void refreshSlowDebug(), 1000);
+
+debugPanel.addEventListener('toggle', () => {
+  if (!debugPanel.open) return;
+  void refreshSlowDebug();
+  void refreshScatter();
+});
 
 // ---------------------------------------------------------------------------
 // Boot

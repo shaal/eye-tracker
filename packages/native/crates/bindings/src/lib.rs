@@ -236,6 +236,8 @@ impl From<&core::EngineConfig> for EngineConfigView {
 #[napi(object)]
 pub struct FrameOutput {
     pub has_gaze: bool,
+    /// This frame's tracking confidence, independent of the guard's verdict.
+    pub quality: f64,
     pub x: f64,
     pub y: f64,
     pub raw_x: f64,
@@ -277,6 +279,7 @@ impl From<core::FrameOutput> for FrameOutput {
     fn from(o: core::FrameOutput) -> Self {
         Self {
             has_gaze: o.has_gaze,
+            quality: o.quality,
             x: o.x,
             y: o.y,
             raw_x: o.raw_x,
@@ -341,6 +344,20 @@ impl From<&CalibrationReport> for CalibrationReportJs {
             cross_validated: r.cross_validated,
         }
     }
+}
+
+/// One calibration sample in gaze-feature space, for the debug scatter plot.
+///
+/// If the per-target clusters overlap here, the input signal never separated
+/// the targets and no amount of refitting will help — a different diagnosis to
+/// "the fit was poor" (ADR-0006).
+#[napi(object)]
+pub struct ScatterPointJs {
+    pub gx: f64,
+    pub gy: f64,
+    pub target_index: u32,
+    /// False when the outlier filter dropped this sample from the fit.
+    pub kept: bool,
 }
 
 /// Serializable calibration, for persisting a profile to disk.
@@ -615,6 +632,33 @@ impl Engine {
     #[napi]
     pub fn clear_calibration(&mut self) {
         self.inner.clear_calibration();
+    }
+
+    /// Gaze-feature scatter from the most recent calibration run, including the
+    /// samples the outlier filter rejected. Debug panel only — not a hot path.
+    #[napi]
+    pub fn calibration_scatter(&self) -> Vec<ScatterPointJs> {
+        self.inner
+            .calibration_scatter()
+            .iter()
+            .map(|p| ScatterPointJs {
+                gx: p.gx,
+                gy: p.gy,
+                target_index: p.target_index as u32,
+                kept: p.kept,
+            })
+            .collect()
+    }
+
+    /// Map a synthetic frame through the calibration model without touching any
+    /// engine state. The debug panel finite-differences this to measure how many
+    /// screen pixels one unit of iris offset is worth.
+    ///
+    /// Returns nothing when there is no calibration loaded.
+    #[napi]
+    pub fn predict_frame(&self, frame: Float64Array) -> Result<Option<Point>> {
+        let slots: &[f64] = &frame;
+        Ok(self.inner.predict_frame(slots).map_err(err)?.map(Point::from))
     }
 
     #[napi]

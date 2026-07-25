@@ -13,11 +13,24 @@ import {
   findNonFinite,
   NO_FACE,
   type GazeFeatures,
+  type Landmark,
 } from '@eye-tracker/core';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
 export interface VisionCallbacks {
-  onFrame(frame: Float64Array, features: GazeFeatures, inferenceMs: number): void;
+  /**
+   * `landmarks` is the raw MediaPipe result for this frame, or null when no
+   * face was found. It stays inside the renderer — it is far too large to send
+   * over IPC every frame (ADR-0009) — and exists so the debug views can draw
+   * the iris rim and eyelid contour, which the packed feature vector reduces
+   * away. The array is MediaPipe's own; do not retain it past the callback.
+   */
+  onFrame(
+    frame: Float64Array,
+    features: GazeFeatures,
+    inferenceMs: number,
+    landmarks: readonly Landmark[] | null,
+  ): void;
   onStatus(patch: {
     cameraReady?: boolean;
     modelReady?: boolean;
@@ -214,6 +227,7 @@ export class VisionLoop {
     this.lastVideoTime = this.video.currentTime;
 
     let features: GazeFeatures = NO_FACE;
+    let faceLandmarks: readonly Landmark[] | null = null;
     try {
       const t0 = performance.now();
       const result = this.landmarker.detectForVideo(this.video, now);
@@ -234,6 +248,7 @@ export class VisionLoop {
           },
           { swapEyes: this.options.swapEyes ?? false },
         );
+        faceLandmarks = landmarks;
       } else if (landmarks) {
         this.cb.onStatus({
           message: `Model returned ${landmarks.length} landmarks — iris refinement missing`,
@@ -251,7 +266,7 @@ export class VisionLoop {
     if (bad !== null) {
       console.error(`[vision] non-finite value in frame slot ${bad}; dropping frame`);
     } else {
-      this.cb.onFrame(this.buffer, features, this.inferenceMs);
+      this.cb.onFrame(this.buffer, features, this.inferenceMs, faceLandmarks);
     }
 
     this.scheduleNext();
