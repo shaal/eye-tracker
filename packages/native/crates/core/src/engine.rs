@@ -5,7 +5,7 @@ use crate::blink::arbiter::{ClickArbiter, ClickKind};
 use crate::blink::fsm::BlinkPhase;
 use crate::blink::gesture::GestureDetector;
 use crate::calibration::{
-    CalibrationError, CalibrationModel, Collector, SampleRejection,
+    CalibrationError, CalibrationModel, Collector, SampleRejection, ScatterPoint,
 };
 use crate::config::EngineConfig;
 use crate::filter::history::History;
@@ -81,6 +81,13 @@ impl Guard {
 pub struct FrameOutput {
     /// False when no calibration is loaded or no face was found.
     pub has_gaze: bool,
+    /// This frame's tracking confidence, passed straight through.
+    ///
+    /// The guard already refuses to move the cursor below the quality
+    /// threshold, but it reports only its *first* reason — so while control is
+    /// off it says "control disabled" and hides a quality problem entirely.
+    /// Validation and the debug HUD need the number itself, not the verdict.
+    pub quality: f64,
     /// Smoothed cursor position (screen DIP).
     pub x: f64,
     pub y: f64,
@@ -132,6 +139,7 @@ impl Default for FrameOutput {
     fn default() -> Self {
         Self {
             has_gaze: false,
+            quality: 0.0,
             x: 0.0,
             y: 0.0,
             raw_x: 0.0,
@@ -200,6 +208,10 @@ pub struct Engine {
     tracked_since_ms: Option<f64>,
     last_dispatched: Option<(i64, i64)>,
     collector: Option<Collector>,
+    /// Gaze-feature scatter from the most recent calibration run, retained for
+    /// the debug panel. `finish_calibration` consumes the collector, so without
+    /// this the samples would be gone exactly when they become interesting.
+    last_scatter: Vec<ScatterPoint>,
     armed_target: Option<usize>,
     fps: f64,
     last_error: Option<String>,
@@ -227,6 +239,7 @@ impl Engine {
             tracked_since_ms: None,
             last_dispatched: None,
             collector: None,
+            last_scatter: Vec::new(),
             armed_target: None,
             fps: 0.0,
             last_error: None,
@@ -303,6 +316,9 @@ impl Engine {
 
     pub fn begin_calibration(&mut self, targets: Vec<Vec2>) {
         self.collector = Some(Collector::new(targets));
+        // Stale scatter from a previous run would be read as belonging to this
+        // one, which is worse than showing nothing.
+        self.last_scatter.clear();
         self.armed_target = None;
         // Never drive the cursor while the user is fixating calibration dots.
         self.control_enabled = false;
@@ -333,6 +349,9 @@ impl Engine {
     ) -> Result<CalibrationModel, EngineError> {
         let collector = self.collector.take().ok_or(EngineError::NoCalibrationInProgress)?;
         self.armed_target = None;
+        // Captured before the fit can fail: a *failed* calibration is precisely
+        // when you want to look at what was collected.
+        self.last_scatter = collector.scatter();
         let model = collector
             .finish(self.cfg.px_per_degree, display_fingerprint)
             .map_err(EngineError::Calibration)?;
@@ -340,6 +359,22 @@ impl Engine {
         self.filter.reset();
         self.history.clear();
         Ok(model)
+    }
+
+    /// Gaze-feature scatter from the last calibration run (debug panel).
+    pub fn calibration_scatter(&self) -> &[ScatterPoint] {
+        &self.last_scatter
+    }
+
+    /// Run the calibration model on an arbitrary frame without touching any
+    /// engine state — no filtering, no cursor, no blink FSM.
+    ///
+    /// This is what lets the debug panel measure the model's local gain
+    /// (screen px per unit of `gx`) by finite differences, instead of
+    /// reimplementing `expand()` in TypeScript and letting the two drift.
+    pub fn predict_frame(&self, slots: &[f64]) -> Result<Option<Vec2>, EngineError> {
+        let frame = GazeFrame::decode(slots).map_err(EngineError::Frame)?;
+        Ok(self.model.as_ref().map(|m| m.predict(&frame)))
     }
 
     // ---- hot path ------------------------------------------------------
@@ -608,8 +643,9 @@ impl Engine {
         }
     }
 
-    fn snapshot(&self, guard: Guard, _frame: &GazeFrame) -> FrameOutput {
+    fn snapshot(&self, guard: Guard, frame: &GazeFrame) -> FrameOutput {
         FrameOutput {
+            quality: frame.quality,
             guard: guard.as_u8(),
             guard_reason: guard.as_str().to_string(),
             control_enabled: self.control_enabled,
@@ -1374,6 +1410,46 @@ mod tests {
 
         let out = e.push_frame(&pack(t + 100.0, 0.0, 0.0, 0.0)).unwrap();
         assert!(out.head_compensated, "head-motion calibration should enable compensation");
+    }
+
+    /// The scatter has to outlive the collector, because the debug panel only
+    /// asks for it *after* the fit has finished.
+    #[test]
+    fn scatter_survives_finish_calibration() {
+        let (mut e, _) = engine();
+        assert!(e.calibration_scatter().is_empty(), "nothing collected yet");
+        calibrate(&mut e);
+
+        let scatter = e.calibration_scatter();
+        assert!(!scatter.is_empty(), "scatter must persist past finish_calibration");
+        assert_eq!(scatter.iter().map(|p| p.target_index).max(), Some(8));
+        assert!(scatter.iter().all(|p| p.gx.is_finite() && p.gy.is_finite()));
+    }
+
+    #[test]
+    fn begin_calibration_clears_the_previous_scatter() {
+        let (mut e, _) = engine();
+        calibrate(&mut e);
+        assert!(!e.calibration_scatter().is_empty());
+        e.begin_calibration(target_grid(&BOUNDS, 9));
+        assert!(e.calibration_scatter().is_empty(), "stale scatter would be read as current");
+    }
+
+    /// `predict_frame` must agree with what the hot path maps, but without
+    /// disturbing the filter, the blink FSM, or the cursor.
+    #[test]
+    fn predict_frame_is_stateless_and_matches_the_model() {
+        let (mut e, log) = engine();
+        assert!(e.predict_frame(&pack(0.0, 0.0, 0.0, 0.0)).unwrap().is_none(), "no model yet");
+
+        calibrate(&mut e);
+        let v = pack(11_000.0, 0.06, -0.04, 0.0);
+        let want = e.calibration().unwrap().predict(&GazeFrame::decode(&v).unwrap());
+
+        let before = log.calls().len();
+        let got = e.predict_frame(&v).unwrap().expect("calibrated");
+        assert!(got.distance_to(want) < 1e-9);
+        assert_eq!(log.calls().len(), before, "predict_frame must not touch the mouse");
     }
 
     #[test]
