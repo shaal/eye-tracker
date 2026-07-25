@@ -246,6 +246,9 @@ function mergeTuning(base: TuningPatch, patch: TuningPatch): TuningPatch {
     filter: { ...base.filter, ...patch.filter },
     blink: { ...base.blink, ...patch.blink },
     guard: { ...base.guard, ...patch.guard },
+    // Omitting `takeover` here silently discarded the yield-to-pointer setting
+    // on every save, so it never survived a restart.
+    takeover: { ...base.takeover, ...patch.takeover },
     pxPerDegree: patch.pxPerDegree ?? base.pxPerDegree,
   };
 }

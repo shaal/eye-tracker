@@ -47,10 +47,15 @@ pub trait MouseBackend: Send {
     `EventField::MOUSE_EVENT_CLICK_STATE` set to the click count — this is the
     field that makes a double-click a real double-click.
   - Drag support falls out of the same primitives for future use.
-- **Windows / Linux** (`mouse/fallback.rs`): `enigo`, with an explicit
-  DPI-scale conversion applied by the caller, and double-click emulated as two
-  clicks with the platform's expected spacing. Flagged in code as lower fidelity
-  and untested on those platforms.
+- **Windows / Linux** (`mouse/fallback.rs`): `enigo`, and double-click emulated
+  as two clicks. Flagged in code as lower fidelity and untested on those
+  platforms.
+
+  DPI conversion is owned **by the backend**, not the caller: `EnigoMouse` holds
+  a `scale` factor and applies it in `move_to`/`cursor_position`, so the engine
+  can keep speaking logical (DIP) coordinates everywhere. It currently defaults
+  to 1.0 and nothing sets it, which is correct only on unscaled displays — see
+  the platform issue tracking this.
 - **Headless / test** (`mouse/null.rs`): records calls without touching the OS.
   This is what `cargo test` links against, so the full engine — including click
   synthesis — is testable in CI with no display and no permissions.

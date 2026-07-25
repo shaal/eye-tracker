@@ -103,9 +103,11 @@ locations to identify 18 parameters.
 ### Solver
 
 Hand-rolled **Cholesky decomposition** in `src/math/linalg.rs`. The matrix is
-19×19 and symmetric positive-definite by construction (ΦᵀΦ is PSD, +λI with
+p×p where p is the explicit feature count — **18×18** at the `FULL` tier, 5×5 at
+`BASIC` — and symmetric positive-definite by construction (ΦᵀΦ is PSD, +λI with
 λ>0 makes it PD), so Cholesky is both the fastest and the numerically right
-choice. At this size it is ~40 lines and a few microseconds, which is not worth
+choice. (The intercept adds a 19th degree of freedom but no column, since it is
+handled by centering.) At this size it is ~40 lines and a few microseconds, which is not worth
 a linear algebra dependency in a module we want to compile fast and audit fully.
 
 ### Calibration protocol

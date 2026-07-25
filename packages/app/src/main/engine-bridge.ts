@@ -118,8 +118,6 @@ export class EngineBridge {
   // ---- hot path ------------------------------------------------------
 
   pushFrame(frame: Float64Array): EngineFrameState | null {
-    this.lastFrameAtMs = Date.now();
-
     // Apply a pending enable using this frame's timestamp, so the engine's
     // arming window is measured in the same clock domain as the frames it is
     // comparing against.
@@ -135,6 +133,12 @@ export class EngineBridge {
       console.error('[engine] pushFrame failed:', err);
       return null;
     }
+
+    // Stamped only after the engine has actually accepted the frame. Doing it
+    // on arrival would let a stream of frames the engine is rejecting keep the
+    // watchdog satisfied indefinitely, which defeats the whole point of it
+    // (ADR-0011).
+    this.lastFrameAtMs = Date.now();
 
     this.lastState = state;
     for (const cb of this.frameListeners) cb(state);
@@ -231,6 +235,12 @@ export class EngineBridge {
    *   it was calibrated in (ADR-0015).
    */
   startCalibration(points: 5 | 9, withHeadMotion = true): Point[] {
+    // Starting again while a run is in flight would leave the previous timer
+    // chain alive, and two chains racing on `setCalibrationTarget` would arm
+    // the wrong target.
+    this.clearCalibrationTimer();
+    if (this.calibration.active) this.engine.cancelCalibration();
+
     this.setControlEnabled(false);
     const bounds = primaryBounds();
     const grid = native.calibrationTargets(bounds, points) as Point[];
@@ -323,12 +333,18 @@ export class EngineBridge {
 
   finishCalibration(): CalibrationReport {
     this.clearCalibrationTimer();
-    const model = this.engine.finishCalibration(this.fingerprint);
-    this.calibration = { ...IDLE_CALIBRATION };
-    this.emitCalibration();
-
-    saveProfile(this.fingerprint, model as unknown as CalibrationProfile);
-    return model.report as unknown as CalibrationReport;
+    try {
+      const model = this.engine.finishCalibration(this.fingerprint);
+      saveProfile(this.fingerprint, model as unknown as CalibrationProfile);
+      return model.report as unknown as CalibrationReport;
+    } finally {
+      // The fit can legitimately fail (too few samples, degenerate data). The
+      // native side has already dropped its collector by then, so leaving the
+      // bridge in a calibrating state would strand the UI *and* keep
+      // Guard::Calibrating blocking control indefinitely.
+      this.calibration = { ...IDLE_CALIBRATION };
+      this.emitCalibration();
+    }
   }
 
   cancelCalibration(): void {

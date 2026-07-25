@@ -12,7 +12,8 @@
  * Safe to re-run. Non-fatal on network failure — install should not break, and
  * the app surfaces a clear "model missing" state instead.
  */
-import { createWriteStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, access, stat, readdir, copyFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,9 +30,20 @@ const MODEL = {
   // float16 build: 478 landmarks incl. iris, 52 blendshapes, transformation matrix.
   url: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
   minBytes: 1_000_000,
+  // Pinned so the model cannot change under us between installs. Note this is
+  // trust-on-first-use: Google publishes no checksum for this URL, so the digest
+  // was computed from a verified download rather than obtained from upstream.
+  // It still detects corruption, truncation, and silent upstream replacement.
+  sha256: '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff',
 };
 
 const exists = (p) => access(p).then(() => true, () => false);
+
+async function sha256File(path) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
+}
 
 async function findWasmSource() {
   // npm workspaces may hoist to the root or keep it package-local.
@@ -60,12 +72,13 @@ async function downloadModel() {
   const dest = join(MODEL_DEST, MODEL.name);
   if (await exists(dest)) {
     const { size } = await stat(dest);
-    if (size >= MODEL.minBytes) {
-      console.log(`[fetch-models] ${MODEL.name} already present (${(size / 1e6).toFixed(1)} MB)`);
+    if (size >= MODEL.minBytes && (await sha256File(dest)) === MODEL.sha256) {
+      console.log(`[fetch-models] ${MODEL.name} already present and verified`);
       return true;
     }
     // A truncated file from an interrupted download is worse than none: it
     // fails at model-load time with an opaque error.
+    console.warn('[fetch-models] cached model failed verification — re-downloading');
     await rm(dest, { force: true });
   }
 
@@ -78,7 +91,16 @@ async function downloadModel() {
     await pipeline(Readable.fromWeb(res.body), createWriteStream(tmp));
     const { size } = await stat(tmp);
     if (size < MODEL.minBytes) throw new Error(`suspiciously small (${size} bytes)`);
-    // Rename only after the size check, so `dest` existing always means valid.
+
+    const digest = await sha256File(tmp);
+    if (digest !== MODEL.sha256) {
+      throw new Error(
+        `checksum mismatch\n  expected ${MODEL.sha256}\n  got      ${digest}\n` +
+          `  The model at this URL has changed. Verify it before updating the pin.`,
+      );
+    }
+
+    // Rename only after both checks, so `dest` existing always means valid.
     const { rename } = await import('node:fs/promises');
     await rename(tmp, dest);
     console.log(`[fetch-models] ${MODEL.name} -> resources/models (${(size / 1e6).toFixed(1)} MB)`);

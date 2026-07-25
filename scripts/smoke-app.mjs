@@ -52,22 +52,29 @@ child.on('exit', (code, signal) => {
   const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   console.log(`\nApp exited (code=${code} signal=${signal}) after ${(elapsedMs / 1000).toFixed(1)}s.`);
 
-  // An instant clean exit is almost always the single-instance lock: another
-  // copy is already running, the second quits, and we would otherwise report a
-  // confident pass having tested nothing at all.
-  if (elapsedMs < SECONDS * 500 && lines.length === 0) {
-    console.log(
-      '\nINCONCLUSIVE: the app exited immediately with no output.\n' +
-        'Another instance is probably already running (single-instance lock).\n' +
-        'Quit it and re-run — this was not a real test.',
-    );
-    process.exit(2);
+  // The test is "the app stays up and healthy for N seconds". Any exit before
+  // we terminate it is a failure — otherwise a crash two seconds in reports a
+  // confident pass simply because none of the known error patterns matched.
+  if (!terminating) {
+    if (lines.length === 0) {
+      console.log(
+        '\nINCONCLUSIVE: the app exited immediately with no output.\n' +
+          'Another instance is probably already running (single-instance lock).\n' +
+          'Quit it and re-run — this was not a real test.',
+      );
+      process.exit(2);
+    }
+    console.log('\nFAILURE: the app exited on its own before the timeout.');
+    summarize(1);
+    return;
   }
   summarize();
 });
 
+let terminating = false;
 const timer = setTimeout(() => {
   if (!exited) {
+    terminating = true;
     console.log(`\n${SECONDS}s elapsed — terminating.`);
     child.kill('SIGTERM');
     setTimeout(() => child.kill('SIGKILL'), 2000).unref();
@@ -75,7 +82,7 @@ const timer = setTimeout(() => {
 }, SECONDS * 1000);
 timer.unref();
 
-function summarize() {
+function summarize(forcedExitCode = 0) {
   const text = lines.join('\n');
   const fatal = [
     ['preload missing', /no preload script found/i],
@@ -88,9 +95,13 @@ function summarize() {
 
   console.log('\n— summary —');
   if (hits.length === 0) {
-    console.log('No fatal startup errors detected.');
+    console.log(
+      forcedExitCode === 0
+        ? 'No fatal startup errors detected.'
+        : 'No known error pattern matched, but the app did not survive the run.',
+    );
   } else {
     for (const [name] of hits) console.log(`FAILURE: ${name}`);
   }
-  process.exit(hits.length === 0 ? 0 : 1);
+  process.exit(hits.length === 0 ? forcedExitCode : 1);
 }

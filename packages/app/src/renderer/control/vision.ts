@@ -70,6 +70,8 @@ export class VisionLoop {
   private lastVideoTime = -1;
   private rvfcHandle = 0;
   private fallbackTimer = 0;
+  /** Serializes `switchCamera` so concurrent calls cannot leak a stream. */
+  private switching: Promise<void> = Promise.resolve();
 
   private options: VisionOptions;
 
@@ -94,12 +96,30 @@ export class VisionLoop {
     this.scheduleNext();
   }
 
-  /** Switch cameras without tearing down the loaded model. */
+  /**
+   * Switch cameras without tearing down the loaded model.
+   *
+   * Serialized: two overlapping calls would each open a stream and the earlier
+   * one would be overwritten without being stopped, leaking a camera (and
+   * leaving its indicator light on).
+   */
   async switchCamera(deviceId: string): Promise<void> {
-    this.options = { ...this.options, deviceId };
-    this.stream?.getTracks().forEach((t) => t.stop());
-    this.lastVideoTime = -1;
-    await this.openCamera();
+    const previous = this.switching;
+    let release!: () => void;
+    this.switching = new Promise<void>((r) => {
+      release = r;
+    });
+    await previous;
+
+    try {
+      this.options = { ...this.options, deviceId };
+      this.stream?.getTracks().forEach((t) => t.stop());
+      this.stream = null;
+      this.lastVideoTime = -1;
+      await this.openCamera();
+    } finally {
+      release();
+    }
   }
 
   private async openCamera(): Promise<void> {

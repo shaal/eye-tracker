@@ -446,9 +446,18 @@ $('dbg-dblclick').addEventListener('click', () => void window.eyeTracker.debugCl
 // ---------------------------------------------------------------------------
 
 void (async () => {
-  updateSliderVisibility = buildSliders($<HTMLDivElement>('sliders'), SLIDERS, (patch: TuningPatch) => {
-    void window.eyeTracker.setTuning(patch);
-  });
+  // Fetch the live config first: the sliders must show what the engine is
+  // actually running, not the hardcoded defaults.
+  const tuning = await window.eyeTracker.getTuning();
+
+  updateSliderVisibility = buildSliders(
+    $<HTMLDivElement>('sliders'),
+    SLIDERS,
+    (patch: TuningPatch) => {
+      void window.eyeTracker.setTuning(patch);
+    },
+    tuning,
+  );
 
   const settings = (await window.eyeTracker.getSettings()) as {
     showRawGaze?: boolean;
@@ -462,7 +471,6 @@ void (async () => {
   optHeadMotion.checked = settings.calibrationHeadMotion ?? true;
   optSwapEyes.checked = settings.swapEyes ?? false;
 
-  const tuning = await window.eyeTracker.getTuning();
   applyMode(((tuning['mode'] as string) ?? 'blink') as ClickMode);
   optTakeover.checked = (tuning['takeoverEnabled'] as boolean) ?? true;
 

@@ -154,15 +154,26 @@ export const SLIDERS: SliderSpec[] = [
   },
 ];
 
+/**
+ * @param current live engine config, keyed by the same names as `SliderSpec.key`.
+ *   Without it the sliders show hardcoded defaults while the engine is running
+ *   persisted values — the UI would then be lying about the current state, and
+ *   nudging any slider would silently snap that parameter back to its default.
+ */
 export function buildSliders(
   root: HTMLElement,
   specs: SliderSpec[],
   onChange: (patch: TuningPatch) => void,
+  current: Record<string, number | boolean | string> = {},
 ): (mode: 'blink' | 'wink') => void {
   root.replaceChildren();
   const modeScoped: Array<{ el: HTMLElement; mode: 'blink' | 'wink' }> = [];
 
-  for (const spec of specs) {
+  for (const base of specs) {
+    const live = current[base.key];
+    const spec: SliderSpec =
+      typeof live === 'number' && Number.isFinite(live) ? { ...base, value: live } : base;
+
     const wrap = document.createElement('div');
     wrap.className = 'slider';
     if (spec.onlyMode) modeScoped.push({ el: wrap, mode: spec.onlyMode });
