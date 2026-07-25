@@ -1,0 +1,20 @@
+{
+  "name": "@eye-tracker/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared contracts: MediaPipe landmark constants, feature extraction, packed IPC frame layout",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  }
+}

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The app loads only local content and needs no network at runtime
+      (ADR-0003), so remote origins are forbidden outright. 'wasm-unsafe-eval'
+      is required to compile the MediaPipe WASM module.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' ws: http://localhost:*; worker-src 'self' blob:;"
+    />
+    <title>Eye Tracker</title>
+    <link rel="stylesheet" href="./control/styles.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <h1>Eye&nbsp;Tracker</h1>
+      <div class="bar-right">
+        <span id="guard-pill" class="pill pill-off">starting…</span>
+        <button id="toggle-control" class="btn btn-primary" disabled>Enable control</button>
+      </div>
+    </header>
+
+    <div id="banners"></div>
+
+    <main class="grid">
+      <section class="panel">
+        <h2>Camera</h2>
+        <div class="video-wrap">
+          <video id="video" playsinline muted></video>
+          <canvas id="debug-canvas"></canvas>
+        </div>
+        <label class="field">
+          <span>Camera</span>
+          <select id="camera-select"></select>
+        </label>
+        <p class="hint" id="vision-message">Initialising…</p>
+        <p class="hint">
+          A phone exposed as a virtual webcam usually has a much better sensor
+          than a built-in laptop camera, and iris localisation is sensor-limited.
+          Switching cameras invalidates the calibration — recalibrate after.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>Status</h2>
+        <dl class="stats">
+          <dt>Blocked by</dt><dd id="s-guard">—</dd>
+          <dt>Camera fps</dt><dd id="s-fps">—</dd>
+          <dt>Inference</dt><dd id="s-inference">—</dd>
+          <dt>Delegate</dt><dd id="s-delegate">—</dd>
+          <dt>Quality</dt><dd id="s-quality">—</dd>
+          <dt>Gaze (gx, gy)</dt><dd id="s-gaze">—</dd>
+          <dt>Head (yaw/pitch/roll)</dt><dd id="s-head">—</dd>
+          <dt>Pose drift</dt><dd id="s-drift">—</dd>
+          <dt>Gaze spread</dt><dd id="s-spread">—</dd>
+          <dt>Clamp radius</dt><dd id="s-clamp-radius">—</dd>
+          <dt>Cursor</dt><dd id="s-cursor">—</dd>
+          <dt>Fixation clamp</dt><dd id="s-clamp">—</dd>
+        </dl>
+        <div class="meter-row">
+          <label>Left eye</label>
+          <div class="meter"><div id="m-left" class="meter-fill"></div></div>
+        </div>
+        <div class="meter-row">
+          <label>Right eye</label>
+          <div class="meter"><div id="m-right" class="meter-fill"></div></div>
+        </div>
+        <div class="meter-row">
+          <label>Quality</label>
+          <div class="meter"><div id="m-quality" class="meter-fill"></div></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Clicking</h2>
+        <label class="field">
+          <span>Gesture mode</span>
+          <select id="mode-select">
+            <option value="blink">Blink — both eyes</option>
+            <option value="wink">Wink — one eye at a time</option>
+          </select>
+        </label>
+        <p class="hint" id="mode-hint"></p>
+
+        <div id="wink-test" hidden>
+          <p class="hint">
+            Wink one eye and check the correct side lights up. If they are
+            swapped, your camera mirrors its frames — tick the box below.
+          </p>
+          <div class="wink-row">
+            <div class="wink-lamp" id="lamp-left"><b>LEFT</b><span>left click</span></div>
+            <div class="wink-lamp" id="lamp-right"><b>RIGHT</b><span>right click</span></div>
+          </div>
+          <label class="check">
+            <input type="checkbox" id="opt-swap-eyes" />
+            My camera mirrors — swap left and right
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Calibration</h2>
+        <p class="hint">
+          Look directly at each dot until it disappears. Sit the way you normally
+          would — the model is most accurate near the pose you calibrate in.
+        </p>
+        <label class="check">
+          <input type="checkbox" id="opt-head-motion" checked />
+          Include head-motion phase (recommended — enables head tolerance)
+        </label>
+        <div class="row">
+          <button id="cal-9" class="btn">Calibrate (9-point)</button>
+          <button id="cal-5" class="btn">Quick (5-point)</button>
+          <button id="cal-cancel" class="btn btn-ghost" hidden>Cancel</button>
+        </div>
+        <div id="cal-progress" class="hint" hidden></div>
+        <div id="cal-report" class="report" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>Tuning</h2>
+        <p class="hint">
+          Changes apply immediately. See <code>docs/plan/02-risks-and-tuning.md</code>
+          for a symptom&rarr;knob playbook.
+        </p>
+        <div id="sliders" class="sliders"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Behaviour &amp; diagnostics</h2>
+        <label class="check">
+          <input type="checkbox" id="opt-takeover" checked />
+          Yield to mouse/trackpad — touching a physical pointer suspends gaze
+        </label>
+        <label class="check">
+          <input type="checkbox" id="opt-show-raw" />
+          Show unfiltered gaze on the overlay
+        </label>
+        <label class="check">
+          <input type="checkbox" id="opt-overlay" checked />
+          Show crosshair overlay
+        </label>
+        <p class="hint">
+          The buttons below verify the native mouse path independently of gaze.
+          A real double-click selects a word; two singles only move the caret.
+        </p>
+        <div class="row">
+          <button id="dbg-click" class="btn btn-ghost">Single click</button>
+          <button id="dbg-dblclick" class="btn btn-ghost">Double click</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./control/main.ts"></script>
+  </body>
+</html>

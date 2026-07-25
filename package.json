@@ -1,0 +1,34 @@
+{
+  "name": "eye-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "High-accuracy webcam eye tracker that drives the real system cursor",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/native",
+    "packages/app"
+  ],
+  "scripts": {
+    "postinstall": "npm run fetch-models",
+    "fetch-models": "node scripts/fetch-models.mjs",
+    "build:native": "npm run build --workspace @eye-tracker/native",
+    "build:core": "npm run build --workspace @eye-tracker/core",
+    "build:app": "npm run build --workspace @eye-tracker/app",
+    "build": "npm run build:native && npm run build:core && npm run build:app",
+    "dev": "npm run build:native && npm run build:core && npm run dev --workspace @eye-tracker/app",
+    "start": "npm run dev",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test:native",
+    "smoke:mouse": "node scripts/smoke-mouse.mjs",
+    "smoke:app": "npm run build && node scripts/smoke-app.mjs",
+    "test:native": "cargo test --manifest-path packages/native/Cargo.toml -p eye-tracker-core",
+    "clean": "rm -rf packages/*/dist packages/*/out packages/native/target packages/native/*.node"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

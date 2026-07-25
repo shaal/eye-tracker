@@ -1,0 +1,15 @@
+{
+  // Renderers: browser environment. Deliberately WITHOUT @types/node, so a
+  // sandboxed renderer cannot typecheck against Node APIs it does not have
+  // (ADR-0002).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true
+  },
+  "include": ["src/renderer/**/*.ts", "src/shared/**/*.ts", "src/preload/api.d.ts"]
+}
