@@ -12,7 +12,7 @@
 
 ADR-0005 defines both gaze components against the same origin:
 
-```
+```text
 c  = (p_in + p_out) / 2              // eye-corner midpoint
 gx = dot(iris − c, u) / w
 gy = dot(iris − c, v) / w
@@ -72,7 +72,7 @@ strictly monotone over a 1.44× wider span.
 
 ### Stage 2 — the vertical origin becomes the lid aperture
 
-```
+```text
 upper   = midpoint of the two upper-lid landmarks
 lower   = midpoint of the two lower-lid landmarks
 a       = (upper + lower) / 2               // aperture centre
@@ -99,7 +99,7 @@ lower.
 
 Two columns, appended to the `Full` expansion:
 
-```
+```text
 o  = clamp(min(open_left, open_right) / open_ref, 0, 2)
 φ += [ o, gy·o ]
 ```
@@ -203,7 +203,23 @@ per target from each target's mean prediction.
 This is the number #57 asked to have reported, and it is more diagnostic than
 mean error. Collapse and bias produce similar mean errors and completely
 different signatures: `ŷ = y + c` still spans the screen, `ŷ ≈ c` spans nothing.
-It appears in the diagnostics bundle directly under the error line.
+It leads the calibration section of the diagnostics bundle, above the fit's own
+error line.
+
+Two states have to be legible there, not one. The calibration section describes
+the **stored profile** — what it was fitted with. The A/B switch block describes
+**what the engine is set to now**, and a switch takes effect only on the next
+calibration. Those routinely disagree, because flipping a switch and then reading
+the existing numbers is the obvious thing to do and does not work. When they
+disagree the summary says so in as many words, next to the numbers it
+invalidates, and names recalibration as the fix. A reader who assumed they agreed
+would attribute the numbers to the wrong mode, which would make the very A/B this
+ADR exists to enable produce a confident wrong answer.
+
+Every key in `AB_SWITCH_KEYS` now prints in the text summary, asserted by test.
+A switch that is declared A/B-able and never reaches the summary is one the
+reader cannot attribute the numbers to — the same failure as #48, one step
+further downstream.
 
 ## Consequences
 

@@ -583,4 +583,27 @@ mod tests {
             (0..5).collect::<Vec<_>>()
         );
     }
+
+    /// The two switches are independently toggleable, so the reduction has to be
+    /// defined on whatever width the expansion actually has. The openness pair
+    /// is appended past every dropped index, which makes it easy to write a
+    /// reduction that silently truncates them instead — and the loss would look
+    /// like ridge deciding openness did not matter.
+    #[test]
+    fn the_vertical_column_set_keeps_the_openness_pair_when_both_switches_are_on() {
+        let e = Expansion {
+            tier: FeatureTier::Full,
+            basis: VerticalBasis::Aperture,
+            open_ref: Some(0.3),
+        };
+        assert_eq!(e.len(), 20);
+
+        let reduced = active_columns(&e, true);
+        assert_eq!(reduced.len(), 16, "20 columns less the 4 horizontal ones");
+        assert!(reduced.contains(&18), "the openness term must survive the reduction");
+        assert!(reduced.contains(&19), "and so must its interaction with gy");
+        for j in VERTICAL_DROPPED {
+            assert!(!reduced.contains(&j), "column {j} should still have been dropped");
+        }
+    }
 }

@@ -813,6 +813,52 @@ export function diagnosticsFileName(at: Date): string {
  * proceed for several rounds with the two participants looking at different
  * summaries of the same file.
  */
+/**
+ * Where the stored profile's feature semantics disagree with the switches the
+ * engine is set to now (ADR-0025).
+ *
+ * A switch here changes what the *next* calibration is fitted on and does
+ * nothing to a model already loaded, so this state is normal, transient, and
+ * completely invisible unless something says so. Reported rather than resolved:
+ * the fix is "recalibrate", and only the user can do that.
+ *
+ * Returns one sentence per disagreement, in the order a reader would act on
+ * them. Empty when they agree, or when the profile predates ADR-0025 and does
+ * not record what it was fitted with — "not recorded" is already printed on the
+ * line above and inventing a comparison against it would be worse than silence.
+ */
+function verticalSwitchDisagreements(bundle: DiagnosticsBundle): string[] {
+  const k = bundle.calibration;
+  const sw = bundle.abSwitches;
+  if (!k) return [];
+
+  const out: string[] = [];
+  const wanted = sw['apertureVertical'];
+  if (k.verticalBasis != null && typeof wanted === 'boolean') {
+    const now = wanted ? 'aperture' : 'corner';
+    if (now !== k.verticalBasis) {
+      out.push(
+        `STALE: this profile was fitted on the ${k.verticalBasis} basis, but the engine is now ` +
+          `set to ${now}. The numbers above are the ${k.verticalBasis} basis. Recalibrate before ` +
+          'reading this as an A/B of the current setting.',
+      );
+    }
+  }
+  const pairs: Array<[AbSwitchKey, boolean | null, string]> = [
+    ['opennessTerms', k.opennessTerms ?? null, 'openness terms'],
+    ['axisSpecificVertical', k.axisSpecific ?? null, 'the reduced vertical column set'],
+  ];
+  for (const [key, fitted, label] of pairs) {
+    const want = sw[key];
+    if (fitted === null || typeof want !== 'boolean' || want === fitted) continue;
+    out.push(
+      `STALE: ${label} ${want ? 'is on now but was off' : 'is off now but was on'} when this ` +
+        'profile was fitted. Recalibrate to apply it.',
+    );
+  }
+  return out;
+}
+
 export function formatBundleSummary(bundle: DiagnosticsBundle, filePath?: string): string {
   const lines: string[] = [];
   const n = (v: number | null | undefined, digits = 0, unit = '') =>
@@ -833,7 +879,20 @@ export function formatBundleSummary(bundle: DiagnosticsBundle, filePath?: string
   lines.push('A/B switches');
   lines.push(`  ${flag('qualityWeighting')}  ${flag('weightFloor')}`);
   lines.push(`  ${flag('confidenceTrust')}  ${flag('trustFloor')}`);
+  // These three decide what the *next* calibration is fitted on (ADR-0025), and
+  // the whole point of the next hardware session is comparing aperture-on with
+  // aperture-off. A summary that does not say which mode produced the numbers
+  // makes that comparison unreadable, and silently so — the same failure #48
+  // existed to fix, one step further downstream.
+  lines.push(
+    `  ${flag('apertureVertical')}  ${flag('opennessTerms')}  ${flag('axisSpecificVertical')}`,
+  );
   lines.push(`  ${flag('adaptiveClamp')}  ${flag('clampNoiseScale')}  ${flag('minQuality')}`);
+  // Every key in AB_SWITCH_KEYS prints, and a test asserts it. The list exists
+  // because these are the knobs a diagnosis turns; one that is declared here and
+  // never reaches the summary is a switch the reader cannot attribute the
+  // numbers to, which is the whole failure the hoisting was built to avoid.
+  lines.push(`  ${flag('takeoverEnabled')}  ${flag('pxPerDegree')}`);
   lines.push('');
 
   const c = bundle.camera;
@@ -881,15 +940,23 @@ export function formatBundleSummary(bundle: DiagnosticsBundle, filePath?: string
       `  λ ${n(k.lambdaX, 4)} / ${n(k.lambdaY, 4)} · ` +
         (k.crossValidated ? 'cross-validated' : 'NOT cross-validated — optimistic'),
     );
-    // Printed unconditionally, and directly under the error line, because a
+    // Printed unconditionally, first among the per-fit lines, because a
     // collapsed vertical channel is invisible in mean error and is the single
-    // most useful thing to look at first (#57).
+    // number that says whether ADR-0025 worked (#57). A working channel reads
+    // around 0.6–1.0; the session that motivated the change read 0.03.
     lines.push(
-      `  vertical: ${k.verticalBasis ?? 'not recorded'} basis, ` +
-        `range ${n(k.verticalRangeFraction, 2)} of target span` +
-        (k.opennessTerms ? ` · openness terms on (ref ${n(k.openRef, 3)})` : '') +
-        (k.axisSpecific ? ' · reduced vertical column set' : ''),
+      `  VERTICAL RANGE ${n(k.verticalRangeFraction, 2)} of target span` +
+        `  (fitted on the ${k.verticalBasis ?? 'not recorded'} basis` +
+        (k.opennessTerms ? `, openness terms on, ref ${n(k.openRef, 3)}` : '') +
+        (k.axisSpecific ? ', reduced vertical column set' : '') +
+        ')',
     );
+    // The line above describes the *stored profile*; the A/B switches at the top
+    // describe what the engine is set to now, and a switch takes effect only on
+    // the next calibration. Those two states routinely disagree, and a reader
+    // who assumes they agree will attribute the numbers to the wrong mode —
+    // which is the one mistake this whole section exists to prevent.
+    for (const d of verticalSwitchDisagreements(bundle)) lines.push(`  ⚠ ${d}`);
     if (k.qualityWeighted) {
       lines.push(
         `  quality-weighted: mean ${n(k.meanWeight, 2)}, worst ${n(k.minWeight, 2)} — ` +
