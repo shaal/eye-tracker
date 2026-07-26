@@ -49,14 +49,40 @@ export function currentFingerprint(): string {
  * familiar units.
  *
  * Electron does not expose physical display size, so this assumes a typical
- * viewing distance and derives px/mm from the reported DPI scale. It is a
- * presentation detail only — nothing in the estimator depends on it.
+ * viewing distance and a typical pixel density. It is a presentation detail
+ * only — the sole consumer is `mean_error_deg` in `fit.rs`, and nothing in the
+ * estimator depends on it.
+ *
+ * ## The units, because getting them wrong halved every reported figure
+ *
+ * Every coordinate this app handles — display bounds, cursor positions,
+ * calibration targets — is a **device-independent pixel**, not a physical one.
+ * So the density that matters is DIP per inch, and on a Retina Mac that is
+ * roughly 110–150: the panel is ~220–254 physical PPI and `scaleFactor` is 2.
+ *
+ * The previous version took 110 as the *physical* density and then divided by
+ * `scaleFactor` to convert, which double-counted the scaling and produced ~55
+ * DIP/inch — a density no shipping display has. A first real measurement
+ * reported 22.7 px/° where ~45–60 was right, so a genuinely mediocre 5–6° of
+ * error was displayed as a catastrophic 15°. The number was wrong in the
+ * direction that makes the tracker look broken, which is the worst direction
+ * for a figure whose whole job is to tell the user whether to keep going.
+ *
+ * 110 is deliberately the low end of the Retina range: it errs toward
+ * *over*-reporting error, so the app is pessimistic about itself rather than
+ * flattering. Rust's own fallback is 45.0 (`config.rs`), which this now agrees
+ * with to within a few percent instead of being half of it.
+ *
+ * A non-Retina external monitor (~81 PPI at `scaleFactor` 1) is over-estimated
+ * by this constant. That is accepted: macOS is the supported target (ADR-0010),
+ * Retina is the case that matters, and the honest fix is to measure the display
+ * rather than to pick a second constant.
  */
 export function estimatePxPerDegree(assumedViewingDistanceMm = 600): number {
-  const d = screen.getPrimaryDisplay();
-  // Assume ~110 physical PPI for a typical laptop panel, expressed in DIP.
-  const assumedPpi = 110 / (d.scaleFactor || 1);
-  const pxPerMm = assumedPpi / 25.4;
+  // Already device-independent: DIP per inch, NOT physical PPI. Do not divide
+  // by `scaleFactor` — the coordinates this converts are themselves in DIP.
+  const assumedDipPerInch = 110;
+  const pxPerMm = assumedDipPerInch / 25.4;
   const mmPerDegree = assumedViewingDistanceMm * Math.tan((1 * Math.PI) / 180);
   return Math.max(1, pxPerMm * mmPerDegree);
 }
