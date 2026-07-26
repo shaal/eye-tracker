@@ -261,13 +261,21 @@ try, and by a wide margin.
 
 | | corner basis (9 targets) | aperture basis (13 targets) |
 | --- | --- | --- |
-| `verticalRangeFraction` | 0.03 | **0.007** |
+| `verticalRangeFraction` — from the **calibration** fit | 0.03 | **0.007** |
 | λ_y | 675 | **20106** |
 | fitted `gy` sensitivity | 416 px/unit | **0 px/unit** |
 
-Predicted y by target row on the aperture basis: 607.7, 609.2, 608.3, 608.8,
-608.0, 608.1, 608.3. **851 px of target span produced 1 px of predicted span.**
-The vertical model is exactly an intercept.
+Two different measurements agree, and are worth keeping distinct because they
+come from different data. `verticalRangeFraction` above is computed by the
+fitter over its own calibration targets. Independently, the **validation** pass
+— 13 points the model was never fitted to — gives predicted y by target row on
+the aperture basis as 607.7, 609.2, 608.3, 608.8, 608.0, 608.1, 608.3: **851 px
+of target span producing under 2 px of predicted span.**
+
+Either way the vertical model is an intercept. Quoting both matters because a
+collapse visible only in cross-validation could be a generalisation failure,
+whereas one that also shows up on held-out validation points at a different
+protocol is the channel itself.
 
 ### Why: the lid does not lag, it tracks
 
