@@ -583,16 +583,28 @@ function axisCollapseWithLiveOffsetRun() {
   };
   return grid.map(([fx, fy]) => {
     const target = { x: 1512 * fx, y: 1329 * fy };
-    const biasY = (predictedY[String(fy)] ?? 380) - target.y;
+    const key = String(fy);
+    const predicted = predictedY[key];
+    // A missing entry must fail the test loudly rather than quietly fitting a
+    // wrong-but-plausible y — `?? 380` would let the grid drift out of step
+    // with this table without the test ever noticing.
+    assert.ok(predicted !== undefined, `no predicted-y fixture entry for fy=${key}`);
+    const biasY = predicted - target.y;
     const biasX = -150 + (fx > 0.5 ? 6 : -6);
     return cloud(target, { x: biasX, y: biasY }, 10);
   });
 }
 
 test('a live axis with its own material offset is never called healthy just because it is not collapsed', () => {
-  const pattern = describeBiasPattern(
-    summarizeValidation(axisCollapseWithLiveOffsetRun(), PX_PER_DEG).targets,
-  );
+  const report = summarizeValidation(axisCollapseWithLiveOffsetRun(), PX_PER_DEG);
+
+  // The fixture's whole point is a large x offset alongside the y collapse —
+  // confirm that offset is actually there before trusting what the pattern
+  // text says about it.
+  const meanBiasX = report.targets.reduce((s, t) => s + t.bias.x, 0) / report.targets.length;
+  assert.ok(Math.abs(meanBiasX) > 100, `expected a material x bias, got ${meanBiasX}`);
+
+  const pattern = describeBiasPattern(report.targets);
   assert.match(pattern, /y axis has collapsed/);
   assert.doesNotMatch(pattern, /tracking normally/);
   assert.doesNotMatch(pattern, /healthy/);
