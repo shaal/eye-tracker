@@ -564,7 +564,11 @@ export function describeBiasPattern(targets: readonly ValidationTargetResult[]):
       `zoom and resolvable-step diagnostics for ${axis} instead`;
     if (collapsedX && collapsedY) return `${describe('x', slopeX)}. ${describe('y', slopeY)}.`;
     const [dead, deadSlope, live] = collapsedX ? (['x', slopeX, 'y'] as const) : (['y', slopeY, 'x'] as const);
-    return `${describe(dead, deadSlope)}. The ${live} axis is tracking normally — this is a per-axis failure, not a whole-field one.`;
+    // The slope test only rules out collapse — it says nothing about whether
+    // the other axis is otherwise accurate, so it cannot be called "normal" or
+    // "healthy" here. A live axis can still carry its own uniform offset or
+    // gain error; that is a separate diagnosis this function does not make.
+    return `${describe(dead, deadSlope)}. The ${live} axis is not collapsed — this is a per-axis failure, not a whole-field one.`;
   }
 
   if (uniformity > 0.7) {
