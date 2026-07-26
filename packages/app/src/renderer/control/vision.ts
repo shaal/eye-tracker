@@ -12,6 +12,7 @@ import {
   packFrame,
   findNonFinite,
   NO_FACE,
+  type CameraLockStatus,
   type GazeFeatures,
   type Landmark,
 } from '@eye-tracker/core';
@@ -30,6 +31,18 @@ export interface VisionCallbacks {
     features: GazeFeatures,
     inferenceMs: number,
     landmarks: readonly Landmark[] | null,
+    /**
+     * MediaPipe's 4×4 facial transformation matrix for this frame, column-major,
+     * or undefined when the model emitted none.
+     *
+     * `features` already carries yaw/pitch/roll derived from it, which is all
+     * the live pipeline needs. The full matrix is threaded through for the
+     * session recorder alone (ADR-0022): the offline normalization warp of #32
+     * needs the rotation *and* translation, and three Euler angles cannot be
+     * un-collapsed back into them. Like `landmarks`, this array belongs to
+     * MediaPipe — do not retain it past the callback.
+     */
+    transform: ArrayLike<number> | undefined,
   ): void;
   onStatus(patch: {
     cameraReady?: boolean;
@@ -42,21 +55,11 @@ export interface VisionCallbacks {
 }
 
 /**
- * What the camera actually settled on, as opposed to what we asked it for.
- *
- * Reported rather than assumed because every field here is negotiable: the
- * driver picks the format, and whether the exposure lock took at all depends on
- * the camera and the Chromium build.
+ * Re-exported rather than declared here: the lock state is now also written
+ * into every recorded session's manifest (ADR-0022), so it crosses the IPC
+ * boundary and belongs with the shared contracts.
  */
-export interface CameraLockStatus {
-  width: number;
-  height: number;
-  frameRate: number;
-  /** `'manual'` once the lock takes; `null` when the camera reports no mode. */
-  exposureMode: string | null;
-  /** Pinned integration time, or `null` when the camera does not report one. */
-  exposureTimeMs: number | null;
-}
+export type { CameraLockStatus };
 
 export interface VisionOptions {
   /** Preferred camera `deviceId`; empty selects the system default. */
@@ -487,6 +490,7 @@ export class VisionLoop {
 
     let features: GazeFeatures = NO_FACE;
     let faceLandmarks: readonly Landmark[] | null = null;
+    let transform: ArrayLike<number> | undefined;
     try {
       const t0 = performance.now();
       const result = this.landmarker.detectForVideo(this.video, now);
@@ -499,12 +503,9 @@ export class VisionLoop {
         for (const c of result.faceBlendshapes?.[0]?.categories ?? []) {
           blendshapes[c.categoryName] = c.score;
         }
+        transform = result.facialTransformationMatrixes?.[0]?.data;
         features = extractFeatures(
-          {
-            landmarks,
-            blendshapes,
-            transform: result.facialTransformationMatrixes?.[0]?.data,
-          },
+          { landmarks, blendshapes, transform },
           { swapEyes: this.options.swapEyes ?? false },
         );
         faceLandmarks = landmarks;
@@ -525,7 +526,7 @@ export class VisionLoop {
     if (bad !== null) {
       console.error(`[vision] non-finite value in frame slot ${bad}; dropping frame`);
     } else {
-      this.cb.onFrame(this.buffer, features, this.inferenceMs, faceLandmarks);
+      this.cb.onFrame(this.buffer, features, this.inferenceMs, faceLandmarks, transform);
     }
 
     this.scheduleNext();

@@ -15,6 +15,15 @@ export interface Settings {
   swapEyes: boolean;
   /** Preferred camera `deviceId`, or empty for the system default. */
   cameraDeviceId: string;
+  /**
+   * Ceiling on the total size of all recorded sessions, in bytes (ADR-0022).
+   *
+   * The *cap* is remembered; whether recording is on is not, and deliberately
+   * has no field here. A remembered enablement would mean a user who recorded
+   * once is recorded every time they launch the app, which is precisely the
+   * failure the opt-in design exists to prevent.
+   */
+  recordingCapBytes: number;
 }
 
 const DEFAULTS: Settings = {
@@ -26,6 +35,11 @@ const DEFAULTS: Settings = {
   calibrationHeadMotion: true,
   swapEyes: false,
   cameraDeviceId: '',
+  // 2 GB. Two 256×192 PNGs per recorded frame is ~70 KB, and the free-viewing
+  // rate is 10 Hz, so this is roughly 48 minutes of continuous recording —
+  // more than any single data-collection sitting, and small enough to be an
+  // amount of disk someone can agree to without thinking hard about it.
+  recordingCapBytes: 2_000_000_000,
 };
 
 function userDir(): string {

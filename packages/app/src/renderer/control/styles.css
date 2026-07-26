@@ -98,6 +98,15 @@ body {
   font-size: 12px;
 }
 
+/* Stop-recording. The only red button in the app, and it only appears while
+   something is being written to disk (ADR-0022). */
+.btn-danger {
+  background: rgba(255, 70, 70, 0.16);
+  border-color: rgba(255, 90, 90, 0.55);
+  color: #ffd9d9;
+  font-weight: 600;
+}
+
 #banners:empty {
   display: none;
 }
@@ -125,6 +134,43 @@ body {
 .banner-info {
   background: rgba(120, 170, 255, 0.12);
   color: #cfe0ff;
+}
+
+/*
+ * The recording banner (ADR-0022).
+ *
+ * Louder than an error deliberately: an error is something the app failed to
+ * do, this is something the app is doing *to the user* — writing pictures of
+ * their face to disk — and it must be the most conspicuous thing in the window
+ * for as long as it is true. The pulse is there because a static bar in a
+ * familiar place stops being seen after a minute, and this one must not.
+ */
+.banner-recording {
+  background: rgba(255, 70, 70, 0.18);
+  color: #ffdede;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 90, 90, 0.5);
+  animation: recording-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+  0%,
+  100% {
+    background: rgba(255, 70, 70, 0.14);
+  }
+  50% {
+    background: rgba(255, 70, 70, 0.3);
+  }
+}
+
+/* Respect the OS setting: the point is to be noticed, not to make the app
+   unusable for someone who gets sick looking at it. The colour alone still
+   carries the message. */
+@media (prefers-reduced-motion: reduce) {
+  .banner-recording {
+    animation: none;
+    background: rgba(255, 70, 70, 0.26);
+  }
 }
 
 .grid {

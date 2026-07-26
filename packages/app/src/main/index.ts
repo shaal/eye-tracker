@@ -9,6 +9,11 @@ import type {
 import native from '@eye-tracker/native';
 
 import { EngineBridge, type CalibrationUi } from './engine-bridge.js';
+import {
+  RecordingStore,
+  type FrameWritePayload,
+  type StartRecordingRequest,
+} from './recordings.js';
 import { loadSettings, saveSettings, type Settings } from './settings.js';
 import { createControlWindow, createOverlayWindow, resizeOverlay } from './windows.js';
 
@@ -24,6 +29,8 @@ let lastHudAt = 0;
 let clickPulseUntil = 0;
 /** Reference dot for the continuous accuracy probe (debug mode 4). */
 let probePoint: Point | null = null;
+/** Opt-in local session recorder (ADR-0022). Starts closed at every launch. */
+const recordings = new RecordingStore(settings.recordingCapBytes);
 
 let vision: VisionStatus = {
   cameraReady: false,
@@ -288,7 +295,15 @@ function pushOverlay(): void {
     probeVisible: probePoint !== null,
     probeX: probePoint?.x ?? 0,
     probeY: probePoint?.y ?? 0,
+    // Drawn on the always-on-top layer regardless of `visible`, so "am I being
+    // recorded?" is answerable from any Space, behind any window (ADR-0022).
+    recording: recordings.active,
   });
+}
+
+/** Push the recording counters to the control window. */
+async function pushRecordingState(): Promise<void> {
+  send(controlWindow, 'recording:state', await recordings.stats());
 }
 
 function wireIpc(): void {
@@ -434,9 +449,76 @@ function wireIpc(): void {
     return settings;
   });
 
+  // ---------------------------------------------------------------------
+  // Session recording (ADR-0022) — local disk only, never the network
+  // ---------------------------------------------------------------------
+
+  ipcMain.handle('recording:start', async (_e, request: StartRecordingRequest) => {
+    const started = await recordings.start(request, {
+      // Targets are recorded in screen pixels, so the layout they were measured
+      // in is part of the data — the same argument that makes a calibration
+      // profile layout-specific (ADR-0006).
+      displayFingerprint: bridge?.displayFingerprint ?? '',
+    });
+    pushOverlay();
+    await pushRecordingState();
+    return started;
+  });
+
+  ipcMain.on(
+    'recording:frame',
+    (_e, payload: { record: FrameWritePayload['record']; eyeA: BufferLike; eyeB: BufferLike }) => {
+      // `send`, not `handle`: the renderer never waits for the disk.
+      recordings.write({
+        record: payload.record,
+        eyeA: asBytes(payload.eyeA),
+        eyeB: asBytes(payload.eyeB),
+      });
+    },
+  );
+
+  ipcMain.handle('recording:stop', async () => {
+    const stats = await recordings.stop('stopped by the user');
+    pushOverlay();
+    return stats;
+  });
+
+  ipcMain.handle('recording:stats', () => recordings.stats());
+
+  ipcMain.handle('recording:setCap', async (_e, bytes: number) => {
+    // A cap below what is already on disk would stop the next session on its
+    // first frame with no explanation, so refuse the nonsensical values here
+    // rather than letting them look like a bug later.
+    const capBytes = Math.max(50_000_000, Math.round(bytes));
+    settings = { ...settings, recordingCapBytes: capBytes };
+    saveSettings(settings);
+    recordings.setCapBytes(capBytes);
+    return recordings.stats();
+  });
+
+  ipcMain.handle('recording:deleteAll', async () => {
+    const removed = await recordings.deleteAll();
+    pushOverlay();
+    await pushRecordingState();
+    return removed;
+  });
+
+  ipcMain.handle('recording:reveal', () => recordings.reveal());
+
   // --- debug helpers for milestone M2 ---
   ipcMain.handle('debug:moveCursor', (_e, x: number, y: number) => native.moveCursor(x, y));
   ipcMain.handle('debug:click', (_e, count: number) => native.clickCursor(count));
+}
+
+/**
+ * Structured clone hands typed arrays across as `ArrayBuffer` in some Electron
+ * versions and as the view in others; both are `fs.writeFile`-able only after
+ * being normalized to one of them.
+ */
+type BufferLike = ArrayBuffer | Uint8Array;
+
+function asBytes(value: BufferLike): Uint8Array {
+  return value instanceof Uint8Array ? value : new Uint8Array(value);
 }
 
 function mergeTuning(base: TuningPatch, patch: TuningPatch): TuningPatch {
@@ -484,6 +566,18 @@ app.whenReady().then(() => {
     setCancelKeys(ui.active || (bridge?.calibrationUi.active ?? false));
   });
 
+  // The disk cap ends a session without the user asking, so it has to say so
+  // loudly. A recorder that stopped silently and one that is still running look
+  // identical from the outside, and both directions of that confusion are bad.
+  recordings.onAutoStop((reason) => {
+    send(controlWindow, 'app:notice', {
+      level: 'warn',
+      message: `Recording stopped: ${reason}. Delete recordings or raise the cap to record again.`,
+    });
+    pushOverlay();
+    void pushRecordingState();
+  });
+
   wireIpc();
   registerShortcut();
 
@@ -502,6 +596,12 @@ app.whenReady().then(() => {
   controlWindow.on('closed', () => {
     bridge?.setControlEnabled(false);
     controlWindow = null;
+    // The camera is gone with the window, so nothing more can be recorded. End
+    // the session here rather than leaving an open manifest behind, which would
+    // read as "still recording" to anyone who looked at the directory.
+    if (recordings.active) {
+      void recordings.stop('the control window closed').then(() => pushOverlay());
+    }
   });
 
   app.on('activate', () => {
@@ -521,6 +621,11 @@ app.on('will-quit', () => {
   // Restore click-through before tearing down, in case we are quitting while an
   // instruction card happens to be up.
   setOverlayInteractive(false);
+  // Best effort: `will-quit` does not wait for promises, so an interrupted
+  // session may lose its final manifest rewrite. That is why the manifest is
+  // written at *start* — a killed session is still self-describing, it just
+  // lacks the totals.
+  void recordings.stop('the app quit');
   bridge?.dispose();
 });
 

@@ -16,13 +16,16 @@ import {
   type AppStatus,
   type CalibrationProfile,
   type ClickMode,
+  type CameraLockStatus,
   type GazeFeatures,
   type Landmark,
+  type RecordedTarget,
   type TuningPatch,
   type ValidationReport,
 } from '@eye-tracker/core';
-import { VisionLoop, listCameras, type CameraLockStatus } from './vision.js';
+import { VisionLoop, listCameras } from './vision.js';
 import { drawDebugOverlay } from './debug-draw.js';
+import { SessionRecorder, type RecorderUiState } from './recorder.js';
 import { SLIDERS, buildSliders } from './tuning-ui.js';
 import { SignalStats } from './debug/signal-stats.js';
 import { drawEyeZoom, eyeZoomReadout } from './debug/eye-zoom.js';
@@ -118,7 +121,13 @@ let clickMode: ClickMode = 'blink';
 
 interface Banner {
   id: string;
-  level: 'error' | 'warn' | 'info';
+  /**
+   * `recording` is its own level rather than a red `error`, because it is not a
+   * fault: it is a statement about what the app is doing to the user right now
+   * (ADR-0022). It gets its own treatment so it cannot be mistaken for one of
+   * the transient warnings above it.
+   */
+  level: 'error' | 'warn' | 'info' | 'recording';
   message: string;
   action?: { label: string; run: () => void };
 }
@@ -154,6 +163,127 @@ function clearBanner(id: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Session recording (ADR-0022)
+//
+// Off at every launch, with no setting that could turn it back on by itself.
+// While it runs there is a persistent banner here and a pulsing badge on the
+// desktop-wide overlay, because the thing being written to disk is pictures of
+// the user's face and no part of that may be ambiguous.
+// ---------------------------------------------------------------------------
+
+/**
+ * The screen point the user is being asked to look at, or null while free
+ * viewing.
+ *
+ * Only the `collect` phase counts. During `instruct` there is no dot at all and
+ * during `settle` the eye is still travelling to it, so labelling those frames
+ * with the target would put the wrong answer next to the right pixels — the one
+ * kind of error a training set cannot recover from.
+ */
+let calibrationTarget: RecordedTarget | null = null;
+let validationTarget: RecordedTarget | null = null;
+
+function activeTarget(): RecordedTarget | null {
+  return calibrationTarget ?? validationTarget;
+}
+
+const recToggle = $<HTMLButtonElement>('rec-toggle');
+const recDelete = $<HTMLButtonElement>('rec-delete');
+const recReveal = $<HTMLButtonElement>('rec-reveal');
+const recCap = $<HTMLInputElement>('rec-cap');
+
+const MB = 1_000_000;
+const formatBytes = (bytes: number): string =>
+  bytes >= 1_000 * MB ? `${(bytes / (1000 * MB)).toFixed(2)} GB` : `${(bytes / MB).toFixed(0)} MB`;
+
+function renderRecordingState(s: RecorderUiState): void {
+  recToggle.textContent = s.active ? 'Stop recording' : 'Start recording';
+  recToggle.className = s.active ? 'btn btn-danger' : 'btn';
+  recDelete.disabled = s.bytes === 0;
+
+  text(
+    's-rec-state',
+    s.active ? `recording → ${s.sessionId ?? '?'}` : s.sessions > 0 ? 'off' : 'off, nothing recorded',
+  );
+  text('s-rec-size', `${formatBytes(s.bytes)} of ${formatBytes(s.capBytes)} · ${s.sessions} session(s)`);
+  text('s-rec-frames', s.active || s.frames > 0 ? `${s.frames}` : '—');
+  // Dropped frames are a health readout, not an error: the recorder is supposed
+  // to drop rather than delay the tracker. A large and growing number means the
+  // disk or the encoder cannot keep up, and the *data* is thinner than expected
+  // — which is worth knowing before training on it.
+  text(
+    's-rec-dropped',
+    s.droppedLocal + s.droppedDisk === 0
+      ? '0'
+      : `${s.droppedLocal} encoder · ${s.droppedDisk} disk`,
+  );
+  text('rec-message', s.message ?? '');
+
+  if (s.active) {
+    setBanner({
+      id: 'recording',
+      level: 'recording',
+      message:
+        `RECORDING — images of your face are being written to disk. ` +
+        `${s.frames} frames, ${formatBytes(s.bytes)} of ${formatBytes(s.capBytes)}. Nothing is uploaded.`,
+      action: { label: 'Stop', run: () => void recorder.stop() },
+    });
+  } else {
+    clearBanner('recording');
+  }
+}
+
+const recorder = new SessionRecorder(renderRecordingState);
+
+recToggle.addEventListener('click', async () => {
+  // Disabled across the round trip: starting twice would open two session
+  // directories and orphan the first.
+  recToggle.disabled = true;
+  try {
+    if (recorder.active) {
+      await recorder.stop();
+    } else {
+      await recorder.start(video, {
+        camera: cameraLock,
+        cameraLabel: cameraSelect.selectedOptions[0]?.textContent ?? 'unknown camera',
+        swapEyes: optSwapEyes.checked,
+      });
+    }
+  } catch (err) {
+    setBanner({
+      id: 'rec-fail',
+      level: 'error',
+      message: `Recording could not start: ${(err as Error).message}`,
+    });
+  } finally {
+    recToggle.disabled = false;
+  }
+});
+
+recDelete.addEventListener('click', async () => {
+  const removed = await window.eyeTracker.deleteAllRecordings();
+  await recorder.refresh();
+  setBanner({
+    id: 'rec-deleted',
+    level: 'info',
+    message: `Deleted ${removed.sessions} recorded session(s), freeing ${formatBytes(removed.bytes)}.`,
+  });
+  setTimeout(() => clearBanner('rec-deleted'), 6000);
+});
+
+recReveal.addEventListener('click', () => void window.eyeTracker.revealRecordings());
+
+recCap.addEventListener('change', async () => {
+  const stats = await window.eyeTracker.setRecordingCap(Number(recCap.value) * 1000 * MB);
+  recCap.value = (stats.capBytes / (1000 * MB)).toFixed(1);
+  recorder.apply(stats);
+});
+
+// Main is the authority on whether a session is open — it is the side that
+// stops when the cap is reached — so its pushes win over local state.
+window.eyeTracker.onRecordingState((s) => recorder.apply(s));
+
+// ---------------------------------------------------------------------------
 // Vision loop
 // ---------------------------------------------------------------------------
 
@@ -167,7 +297,15 @@ function clearBanner(id: string): void {
  * keeps re-metering to whatever is on screen, and that shows up as jitter no
  * amount of filter tuning will remove, because it is not zero-mean noise.
  */
+/**
+ * The last reported lock state, kept because a recorded session's manifest has
+ * to say which one produced it — data taken with exposure hunting is not the
+ * same data as data taken with it pinned (ADR-0022).
+ */
+let cameraLock: CameraLockStatus | null = null;
+
 function showCameraLock(c: CameraLockStatus): void {
+  cameraLock = c;
   text(
     's-camera-format',
     c.width > 0 ? `${c.width}×${c.height} @ ${c.frameRate.toFixed(0)} fps` : '—',
@@ -183,7 +321,7 @@ function showCameraLock(c: CameraLockStatus): void {
 }
 
 const vision = new VisionLoop(video, {
-  onFrame(frame, features, inferenceMs, landmarks) {
+  onFrame(frame, features, inferenceMs, landmarks, transform) {
     latestFeatures = features;
     // Copied, not retained: the array belongs to MediaPipe and the draw loop
     // reads it on a different clock (see `snapshotLandmarks`).
@@ -201,6 +339,13 @@ const vision = new VisionLoop(video, {
       cameraFps = cameraFps === 0 ? inst : cameraFps * 0.9 + inst * 0.1;
     }
     lastFrameAt = now;
+
+    // Before `sendFrame`, so a recorded frame's `tMs` is the same instant that
+    // the packed frame carries into the engine (ADR-0009) — that shared stamp
+    // is what lets a recording be joined to anything the engine did with it.
+    // Costs nothing while recording is off, which is the normal case: the first
+    // line of `capture` is a boolean test.
+    recorder.capture(video, features, transform, activeTarget(), now);
 
     window.eyeTracker.sendFrame(frame);
     window.eyeTracker.reportVision({
@@ -549,6 +694,18 @@ calCancel.addEventListener('click', () => {
 });
 
 window.eyeTracker.onCalibrationUi(async (c) => {
+  // Label the recorder's frames, before any of the early returns below.
+  const collecting = c.active && c.phase === 'collect' ? c.targets[c.currentIndex] : undefined;
+  calibrationTarget = collecting
+    ? {
+        kind: 'calibration',
+        x: collecting.x,
+        y: collecting.y,
+        index: c.currentIndex,
+        headMotion: c.headMotion,
+      }
+    : null;
+
   if (!c.active && c.phase !== 'done') {
     calCancel.hidden = true;
     calProgress.hidden = true;
@@ -846,6 +1003,17 @@ valCancel.addEventListener('click', () => {
 });
 
 window.eyeTracker.onValidationUi(async (v) => {
+  const collecting = v.active && v.phase === 'collect' ? v.targets[v.currentIndex] : undefined;
+  validationTarget = collecting
+    ? {
+        kind: 'validation',
+        x: collecting.x,
+        y: collecting.y,
+        index: v.currentIndex,
+        headMotion: false,
+      }
+    : null;
+
   if (!v.active && v.phase !== 'done') {
     valStart.disabled = false;
     valCancel.hidden = true;
@@ -1032,11 +1200,17 @@ void (async () => {
     calibrationHeadMotion?: boolean;
     swapEyes?: boolean;
     cameraDeviceId?: string;
+    recordingCapBytes?: number;
   };
   optShowRaw.checked = settings.showRawGaze ?? false;
   optOverlay.checked = settings.overlayVisible ?? true;
   optHeadMotion.checked = settings.calibrationHeadMotion ?? true;
   optSwapEyes.checked = settings.swapEyes ?? false;
+
+  // Only the cap is restored. There is no persisted "recording was on" flag to
+  // restore, by design (ADR-0022) — this panel always comes up off.
+  recCap.value = ((settings.recordingCapBytes ?? 2_000_000_000) / (1000 * MB)).toFixed(1);
+  await recorder.refresh();
 
   applyMode(((tuning['mode'] as string) ?? 'blink') as ClickMode);
   optTakeover.checked = (tuning['takeoverEnabled'] as boolean) ?? true;
