@@ -61,10 +61,23 @@ have:
   3. Raise `clamp_radius` — but note it is only a *floor*; the radius adapts to
      measured spread automatically (ADR-0014). Check "Clamp radius" in the HUD
      to see what is actually in use.
+  4. Lower "Confidence floor" (0.35 → 0.2) if the jitter is worst when quality
+     is low. It lets a poorly-tracked frame be discounted further, which smooths
+     it harder and widens the clamp around it (ADR-0023). It does nothing at all
+     when quality is high, so it is the right knob only when the two move
+     together.
 
 If the cursor jumps rather than jitters, raise "Spike rejection" from 3 to 5.
 
 ### "The cursor lags behind where I look"
+
+**First read "Quality" in the HUD.** Since ADR-0023 the filter is deliberately
+laggier when it does not believe the frame it was handed: a badly-tracked frame
+is smoothed harder, held still more readily, and has to jump further to be
+treated as a saccade. If quality is sitting around 0.5, the lag is the tracker
+telling you it is unsure, and the fix is the lighting or your posture, not a
+slider. If quality is above ~0.85 the modulation is doing almost nothing and the
+lag is ordinary filter lag:
 
 1. Raise `beta` (0.007 → 0.015). The filter gets out of the way faster when
    moving.
@@ -72,6 +85,52 @@ If the cursor jumps rather than jitters, raise "Spike rejection" from 3 to 5.
    bypass the filter entirely.
 3. Check the reported inference time. Above ~15 ms/frame the lag is compute, and
    no filter setting will fix it.
+
+If you would rather have a responsive cursor than an honest one, raise
+**"Confidence floor"** (0.35 → 0.7, or 1.0 to disable the effect entirely).
+That trades accuracy for immediacy: poorly-tracked frames go back to driving the
+cursor at full strength right up to the point where the guard cuts them off.
+
+### "It will not jump to a new target when tracking is poor"
+
+Also ADR-0023, and the knob is the same one. A distrusted frame has to jump
+*further* to clear the saccade threshold — at quality 0.4 the 120 px threshold
+becomes 300 px — because a briefly mislocalised iris looks exactly like a
+saccade, and the gate is the one stage with no recovery: it throws away the
+filter state and teleports. A large movement below the raised threshold still
+gets there, by gliding rather than jumping.
+
+Retune from either end, both live:
+
+1. Raise **"Confidence floor"** to cap the widening (0.7 allows at most 1.43×).
+2. Lower **"Saccade threshold"** (120 → 80 px), which lowers it at every
+   confidence level rather than only when tracking is poor.
+
+The ratio between them is the parameter least validated against real hardware —
+if you find a setting that is clearly better on a real face, that is worth
+reporting.
+
+### "The cursor feels different from one minute to the next"
+
+Expected, and diagnosable. Watch "Quality" in the HUD while it happens.
+
+Tracking quality modulates smoothing continuously (ADR-0023), so slouching,
+turning away from the lamp, or leaning back changes how the cursor behaves — it
+becomes steadier and laggier as quality falls, and snappier as it recovers.
+Before ADR-0023 there was no such ramp: the cursor behaved identically at 0.41
+and 0.99 and then stopped dead at 0.39, which felt like a fault rather than a
+signal.
+
+- **If quality is stable and the feel still changes:** this is not the cause.
+  Check "Clamp radius" in the HUD, which adapts separately to measured noise
+  (ADR-0014).
+- **To make the feel constant regardless of quality:** untick "Scale smoothing by
+  tracking quality" in Behaviour & diagnostics. This restores the pre-ADR-0023
+  filter exactly, and is the A/B switch to use if you suspect the change made
+  things worse.
+- **To keep the ramp but soften it:** raise "Confidence floor". It bounds how far
+  a bad frame can be discounted — at the default 0.35 with the default quality
+  gate at 0.4, no two usable frames differ by more than 2.5×.
 
 ### "It clicks when I do not mean to"
 

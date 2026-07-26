@@ -783,11 +783,17 @@ window.eyeTracker.onCalibrationUi(async (c) => {
 
 // --- behaviour toggles ---
 const optTakeover = $<HTMLInputElement>('opt-takeover');
+const optConfidenceTrust = $<HTMLInputElement>('opt-confidence-trust');
 const optShowRaw = $<HTMLInputElement>('opt-show-raw');
 const optOverlay = $<HTMLInputElement>('opt-overlay');
 
 optTakeover.addEventListener('change', () => {
   void window.eyeTracker.setTuning({ takeover: { enabled: optTakeover.checked } });
+});
+// The A/B switch for ADR-0023. Off restores the pre-ADR-0023 pipeline exactly,
+// so a suspected regression can be attributed without a rebuild (ADR-0004).
+optConfidenceTrust.addEventListener('change', () => {
+  void window.eyeTracker.setTuning({ filter: { confidenceTrust: optConfidenceTrust.checked } });
 });
 optShowRaw.addEventListener('change', () => {
   void window.eyeTracker.setSettings({ showRawGaze: optShowRaw.checked });
@@ -1214,6 +1220,7 @@ void (async () => {
 
   applyMode(((tuning['mode'] as string) ?? 'blink') as ClickMode);
   optTakeover.checked = (tuning['takeoverEnabled'] as boolean) ?? true;
+  optConfidenceTrust.checked = (tuning['confidenceTrust'] as boolean) ?? true;
 
   await startVision(settings.cameraDeviceId ?? '', settings.swapEyes ?? false);
 })();

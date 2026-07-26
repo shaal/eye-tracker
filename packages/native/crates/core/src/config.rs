@@ -67,6 +67,32 @@ pub struct FilterConfig {
     /// Ceiling on the adaptive radius, so a bad tracking patch cannot freeze
     /// the cursor over a huge area.
     pub clamp_radius_max: f64,
+
+    /// Let per-frame confidence modulate smoothing continuously (ADR-0023),
+    /// instead of quality being a hard cliff at `GuardConfig::min_quality`.
+    ///
+    /// Without this, a frame at 0.41 drives the cursor exactly as hard as one at
+    /// 0.99 and a frame at 0.39 stops it dead. Quality drifts across that
+    /// boundary as the user shifts posture, which produces the worst available
+    /// behaviour: the cursor driven confidently by an increasingly unreliable
+    /// estimate, then frozen, then resumed.
+    ///
+    /// Switchable so the change can be A/B'd against the old behaviour on real
+    /// hardware; turning it off reproduces the unmodulated pipeline exactly.
+    /// The `min_quality` guard is unaffected either way — it remains the floor.
+    pub confidence_trust: bool,
+    /// Lower bound on the trust scalar, and therefore on all three modulations
+    /// at once: nothing can be smoothed, widened or gated by more than
+    /// `1 / trust_floor` relative to a fully-trusted frame.
+    ///
+    /// A trust of zero would divide the saccade threshold and the clamp radius
+    /// by zero, so a floor is structurally required rather than merely prudent.
+    /// The default sits just below the default `min_quality` of 0.4 and is
+    /// therefore inert at stock settings — it starts to bite only for a user who
+    /// has loosened the gate, which is exactly when an unbounded discount would
+    /// be dangerous. At the default gate the widest possible modulation is
+    /// 2.5:1, matching the weight spread ADR-0021 allows the calibration fit.
+    pub trust_floor: f64,
 }
 
 impl Default for FilterConfig {
@@ -86,6 +112,8 @@ impl Default for FilterConfig {
             adaptive_clamp: true,
             clamp_noise_scale: 2.5,
             clamp_radius_max: 70.0,
+            confidence_trust: true,
+            trust_floor: 0.35,
         }
     }
 }
