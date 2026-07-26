@@ -145,8 +145,11 @@ export function noiseVerdict(px: number): { label: string; level: 'good' | 'warn
  * many distinguishable positions the tracker can resolve across the screen. Ten
  * means roughly ten separable columns — a screen split into a coarse grid, not
  * a pointer.
+ *
+ * The definition moved to `@eye-tracker/core` when the diagnostics bundle
+ * started carrying this figure (ADR-0024), and is re-exported here so the debug
+ * views are unchanged. One definition, deliberately: a second copy of
+ * `travel / noise` would be free to drift from the one on screen, and the number
+ * a user quotes in a bug report has to be the number they were looking at.
  */
-export function resolvableSteps(travel: number, noise: number): number {
-  if (!Number.isFinite(travel) || !Number.isFinite(noise) || noise <= 0) return Number.NaN;
-  return travel / noise;
-}
+export { resolvableSteps } from '@eye-tracker/core';

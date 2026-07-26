@@ -9,3 +9,4 @@ export * from './calibration/protocol.js';
 export * from './calibration/scatter.js';
 export * from './validation/protocol.js';
 export * from './validation/stats.js';
+export * from './diagnostics/bundle.js';

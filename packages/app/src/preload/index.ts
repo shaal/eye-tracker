@@ -5,6 +5,8 @@ import type {
   CalibrationReport,
   CalibrationScatter,
   CalibrationUiState,
+  DiagnosticsExportResult,
+  DiagnosticsRendererState,
   FrameRecord,
   GazeSensitivity,
   OverlayState,
@@ -86,6 +88,26 @@ const api = {
    */
   setProbePoint: (at?: Point | null): Promise<Point | null> =>
     ipcRenderer.invoke('debug:setProbe', at),
+
+  // ---------------------------------------------------------------------
+  // Diagnostics export (ADR-0024)
+  //
+  // The deliberate opposite of the recording channels below. This bundle is
+  // **numbers only** — no images, no landmark coordinates, nothing from which a
+  // face could be reconstructed — precisely so that it can be pasted into a
+  // public issue without the user having to think about it. Main writes it to a
+  // file and puts a compact summary on the clipboard; the renderer supplies the
+  // measurements it alone holds and never a path or a destination.
+  //
+  // If you are here to add pixels "for context": that is what a recording is
+  // for, and a recording is the thing that never leaves the machine.
+  // ---------------------------------------------------------------------
+
+  exportDiagnostics: (state: DiagnosticsRendererState): Promise<DiagnosticsExportResult> =>
+    ipcRenderer.invoke('diagnostics:export', state),
+
+  /** Open the diagnostics folder, so the file can be dragged onto an issue. */
+  revealDiagnostics: (): Promise<void> => ipcRenderer.invoke('diagnostics:reveal'),
 
   // ---------------------------------------------------------------------
   // Session recording (ADR-0022)

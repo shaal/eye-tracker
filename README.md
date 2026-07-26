@@ -78,6 +78,21 @@ npm run recordings -- --json     # the same, for a training script
 npm run recordings -- --delete   # delete all of it, after confirming
 ```
 
+The mirror image of that is **Copy diagnostics**, in the debug panel next to
+*Run validation*. It exports everything the diagnostic views measured — the noise
+floor, the per-point bias vectors, the calibration fit, and the tuning read back
+out of the engine — as a JSON file, plus a short summary on the clipboard
+([ADR-0024](docs/adrs/0024-shareable-diagnostics-bundle.md)). That bundle is
+**numbers only**: no images, no landmarks, nothing from which a face could be
+reconstructed, asserted by a test. It is designed to be pasted into a public
+issue, which is exactly what a recording is not.
+
+```bash
+npm run diagnostics              # read the newest bundle exported on this machine
+npm run diagnostics -- b.json    # read one somebody attached to an issue
+npm run diagnostics -- --list    # every bundle on this machine
+```
+
 ## How it works
 
 ```

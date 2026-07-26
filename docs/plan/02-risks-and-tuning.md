@@ -30,6 +30,51 @@ recalibrating a problem that calibration cannot fix.
 | It worked earlier — what changed? | **4 · Probe** + **6 · Pose drift** | Change one thing at a time and watch the offset. Any axis past 3σ means you have moved outside where the model was fitted. |
 | Was the calibration ever going to work? | **5 · Scatter** | Overlapping clusters mean the input never separated the targets. Refitting is pointless. |
 
+### Reporting an accuracy problem to someone else
+
+If you are about to file an issue, or hand the problem to somebody who is not
+sitting at your camera, produce a bundle first (ADR-0024). It turns everything on
+that page into numbers another person can read, and it removes an entire round
+trip of "which arrows, and how big?".
+
+1. **Calibrate, then run validation.** A bundle without a validation run still
+   works and is still worth sending — it just cannot say how wrong the tracker
+   is at points it was not fitted to, which is usually the question.
+2. Leave the debug panel open for ~30 seconds first, holding a few normal
+   fixations. The noise floor is estimated from quiet periods and is not
+   trustworthy below about 60 frames; the bundle says so when it has not
+   settled.
+3. Press **Copy diagnostics**, next to *Run validation*.
+4. Paste the clipboard summary into the issue, and attach the JSON file whose
+   path is shown under the button. *Show folder* opens it.
+
+**The bundle is numbers only** — no images, no landmark coordinates, nothing
+from which a face could be reconstructed. That is checked by a test, and it is
+what makes it safe to paste into a public issue without reviewing it first. (The
+*recording* feature is the opposite: it writes pictures of your eyes, it is off
+unless you turn it on, and it never leaves the machine. See ADR-0022.)
+
+To read a bundle someone sent you:
+
+```
+npm run diagnostics -- ./their-bundle.json    # summary + the per-point table
+npm run diagnostics -- --list                 # bundles exported on this machine
+npm run diagnostics -- --raw ./bundle.json    # the file itself
+```
+
+**Comparing two settings.** This is what the bundle is really for. Export one
+bundle, flip the switch you are testing — `qualityWeighting` (ADR-0021),
+`confidenceTrust` (ADR-0023), the exposure lock — recalibrate and revalidate,
+export a second, then:
+
+```
+git diff --no-index before.json after.json
+```
+
+Every float in a bundle is rounded so that two runs differ only where something
+actually moved. Both files must come from the same display layout: a calibration
+is layout-specific, and `environment.displayFingerprint` is how you check.
+
 The key number is the **noise floor** in view 1, converted to cursor pixels.
 Because `gx` is the iris offset divided by eye width (ADR-0005), the entire
 usable signal range spans only about 58 px of iris travel at 720p — so a single

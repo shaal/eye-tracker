@@ -277,10 +277,27 @@
             <div class="row">
               <button id="val-start" class="btn">Run validation</button>
               <button id="val-cancel" class="btn btn-ghost" hidden>Cancel</button>
+              <button id="diag-export" class="btn btn-ghost">Copy diagnostics</button>
+              <button id="diag-reveal" class="btn btn-ghost btn-small">Show folder</button>
             </div>
+            <p class="hint">
+              <b>Copy diagnostics</b> writes everything on this page as a JSON
+              file and puts a short summary on the clipboard, so an accuracy
+              problem can be diagnosed by someone who is not sitting at this
+              camera. It is <b>numbers only</b> — no images, no landmarks,
+              nothing that could reconstruct a face — so it is safe to paste
+              into a public issue. That is the opposite of a recording, which
+              contains pictures of your eyes and never leaves this machine.
+            </p>
+            <label class="check check-inline">
+              <input type="checkbox" id="diag-clouds" />
+              Include every raw sample (about 10&times; larger; lets a reader
+              re-derive the statistics instead of trusting ours)
+            </label>
             <div id="val-progress" class="hint" hidden></div>
             <canvas id="val-map" class="debug-canvas" hidden></canvas>
             <div id="val-report" class="report" hidden></div>
+            <div id="diag-result" class="report" hidden></div>
           </div>
 
           <!-- 4 — probe -->
