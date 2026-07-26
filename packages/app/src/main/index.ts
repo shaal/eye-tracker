@@ -1,6 +1,7 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell, systemPreferences } from 'electron';
 import type {
   AppStatus,
+  DiagnosticsRendererState,
   EngineFrameState,
   Point,
   TuningPatch,
@@ -9,6 +10,7 @@ import type {
 import native from '@eye-tracker/native';
 
 import { EngineBridge, type CalibrationUi } from './engine-bridge.js';
+import { exportDiagnostics, revealDiagnostics } from './diagnostics.js';
 import {
   RecordingStore,
   type FrameWritePayload,
@@ -429,6 +431,42 @@ function wireIpc(): void {
       frame instanceof Float64Array ? frame : new Float64Array(frame as ArrayBufferLike);
     return bridge?.gazeSensitivity(f);
   });
+
+  // ---------------------------------------------------------------------
+  // Diagnostics export (ADR-0024) — numbers only, and designed to be shared
+  //
+  // The mirror image of the recording channels above: those write pixels and
+  // must never leave the machine, this writes nothing but numbers and exists to
+  // be pasted into a public issue. Neither channel takes a URL or a destination
+  // — main writes to one directory it names itself, and the user does the rest.
+  // ---------------------------------------------------------------------
+
+  ipcMain.handle('diagnostics:export', async (_e, renderer: DiagnosticsRendererState) => {
+    // Everything main contributes is read *now*, from the engine, rather than
+    // being cached: the config in particular has to be what Rust is actually
+    // running, because the whole point is comparing two runs of the same build
+    // with a switch flipped (ADR-0021, ADR-0023).
+    return exportDiagnostics(renderer, {
+      displayFingerprint: bridge?.displayFingerprint ?? '',
+      displayBounds: screen.getPrimaryDisplay().workArea,
+      tuning: bridge?.getTuning() ?? {},
+      // From the loaded model rather than from whatever the UI last rendered,
+      // so a bundle exported after a restart still carries the calibration the
+      // engine is using.
+      calibration: bridge?.calibrationProfile()?.report ?? null,
+      engine: bridge?.state
+        ? {
+            fps: bridge.state.fps,
+            poseDrift: bridge.state.poseDrift,
+            headCompensated: bridge.state.headCompensated,
+            calibrated: bridge.state.calibrated,
+            guardReason: bridge.state.guardReason,
+          }
+        : null,
+    });
+  });
+
+  ipcMain.handle('diagnostics:reveal', () => revealDiagnostics());
 
   ipcMain.handle('tuning:set', (_e, patch: TuningPatch) => {
     bridge?.setTuning(patch);

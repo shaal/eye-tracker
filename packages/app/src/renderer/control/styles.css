@@ -295,6 +295,26 @@ body {
   color: var(--accent);
 }
 
+/*
+ * The diagnostics summary is the exact text on the clipboard, shown so the user
+ * can see what they are about to paste before they paste it. Monospaced and
+ * pre-wrapped because its columns are aligned with spaces, and scrollable rather
+ * than tall because it is a preview, not the artefact.
+ */
+.diag-summary {
+  margin: 8px 0 0;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #0b0e13;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+
 .sliders {
   display: flex;
   flex-direction: column;

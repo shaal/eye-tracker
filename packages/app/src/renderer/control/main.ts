@@ -110,6 +110,8 @@ function snapshotLandmarks(source: readonly Landmark[] | null): readonly Landmar
  */
 let latestFrame: Float64Array | null = null;
 let cameraFps = 0;
+/** Smoothed inference time, kept so the diagnostics export can report it. */
+let inferenceMs = 0;
 let lastFrameAt = 0;
 let controlEnabled = false;
 let currentDelegate: 'GPU' | 'CPU' | 'none' = 'none';
@@ -321,8 +323,9 @@ function showCameraLock(c: CameraLockStatus): void {
 }
 
 const vision = new VisionLoop(video, {
-  onFrame(frame, features, inferenceMs, landmarks, transform) {
+  onFrame(frame, features, frameInferenceMs, landmarks, transform) {
     latestFeatures = features;
+    inferenceMs = frameInferenceMs;
     // Copied, not retained: the array belongs to MediaPipe and the draw loop
     // reads it on a different clock (see `snapshotLandmarks`).
     latestLandmarks = snapshotLandmarks(landmarks);
@@ -980,6 +983,10 @@ const valReport = $<HTMLDivElement>('val-report');
 valStart.addEventListener('click', async () => {
   valReport.hidden = true;
   valMapCanvas.hidden = true;
+  // The exported summary describes the run that is about to be replaced.
+  // Leaving it on screen next to a fresh result is how someone attaches the
+  // previous run's file to a report about this one.
+  diagResult.hidden = true;
   // Disabled before the round trip, not after: awaiting first leaves the button
   // live long enough for a double click to start two runs, and the second would
   // reset the sample buckets the first is still filling.
@@ -1086,6 +1093,90 @@ function renderValidationReport(report: ValidationReport): void {
     ${report.dropped > 0 ? `<div class="hint warn">${report.dropped} point(s) dropped for too few usable samples — tracking was lost there.</div>` : ''}
     <div class="hint">${report.advice}</div>`;
 }
+
+// --- 3b · diagnostics export (ADR-0024) ---
+//
+// Next to "Run validation" because that is where a user is standing when they
+// decide the tracker is not good enough: the arrow map is the moment the numbers
+// become a complaint, and this is the button that turns the complaint into
+// something another person can act on.
+//
+// Everything it sends is a measurement. There is no path to add pixels here —
+// see the preload comment and `diagnostics/bundle.ts`. Images belong to the
+// recorder (ADR-0022), which is off by default and never leaves the machine;
+// this is the mirror image and is meant to be shared.
+
+const diagExport = $<HTMLButtonElement>('diag-export');
+const diagReveal = $<HTMLButtonElement>('diag-reveal');
+const diagClouds = $<HTMLInputElement>('diag-clouds');
+const diagResult = $<HTMLDivElement>('diag-result');
+
+diagExport.addEventListener('click', async () => {
+  // Disabled across the round trip, like the validation button: a second click
+  // would write a second near-identical file and leave the user unsure which of
+  // the two paths on screen is the one they should attach.
+  diagExport.disabled = true;
+  diagExport.textContent = 'Copying…';
+  try {
+    const result = await window.eyeTracker.exportDiagnostics({
+      camera: cameraLock,
+      vision: {
+        delegate: currentDelegate,
+        inferenceMs,
+        cameraFps,
+        quality: latestFeatures?.quality ?? 0,
+      },
+      // Read fresh rather than reusing `frameSummary`, which only updates while
+      // the panel is drawing. A bundle exported from a stalled draw loop would
+      // otherwise carry a noise floor from some seconds ago.
+      signal: {
+        ...signalStats.summary(),
+        pxPerGx: sensitivity.pxPerGx,
+        pxPerGy: sensitivity.pxPerGy,
+      },
+      // Whatever the last run produced, or null. Null is a perfectly good
+      // bundle — it just says so, and "never validated" is itself the finding
+      // when someone reports an accuracy problem.
+      validation: lastValidationReport,
+      includeClouds: diagClouds.checked,
+    });
+
+    diagResult.hidden = false;
+    diagResult.replaceChildren();
+
+    const head = document.createElement('strong');
+    head.textContent = result.copied
+      ? `Summary copied to the clipboard · full bundle ${(result.bytes / 1024).toFixed(1)} KB`
+      : `Bundle written (${(result.bytes / 1024).toFixed(1)} KB) — the clipboard could not be set, so copy it from the file`;
+    diagResult.append(head);
+
+    const where = document.createElement('div');
+    where.className = 'hint';
+    // textContent, not innerHTML: this is a filesystem path, and a home
+    // directory is the one string here the app did not author.
+    where.textContent = result.path;
+    diagResult.append(where);
+
+    // Show exactly what is on the clipboard. Someone about to paste into a
+    // public issue should be able to read it first — a privacy promise the user
+    // cannot check is not worth much.
+    const pre = document.createElement('pre');
+    pre.className = 'diag-summary';
+    pre.textContent = result.summary;
+    diagResult.append(pre);
+  } catch (err) {
+    setBanner({
+      id: 'diag-fail',
+      level: 'error',
+      message: `Could not export diagnostics: ${(err as Error).message}`,
+    });
+  } finally {
+    diagExport.disabled = false;
+    diagExport.textContent = 'Copy diagnostics';
+  }
+});
+
+diagReveal.addEventListener('click', () => void window.eyeTracker.revealDiagnostics());
 
 // --- 5 · calibration scatter ---
 
