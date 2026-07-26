@@ -54,21 +54,33 @@ A generative upsampler asked for a sharper iris returns a *plausible* iris
 boundary, not the true one. That is not a smaller error than blur — it is a
 worse kind of error.
 
-Blur produces landmark estimates that are noisy but roughly unbiased and
-temporally independent, and the entire downstream stack is built to absorb
-exactly that: the median pre-filter and self-tuning clamp (ADR-0014), the One
-Euro filter (ADR-0007), and the quiet-period noise-floor estimator that
-characterises it (ADR-0018). Averaging works on this.
+A soft or under-sampled image gives the landmarker less to work with, and the
+error that results decomposes into two parts the pipeline already handles. The
+frame-to-frame part is largely zero-mean jitter, which is exactly what the
+downstream stack is built to average down: the median pre-filter and self-tuning
+clamp (ADR-0014), the One Euro filter (ADR-0007), and the quiet-period
+noise-floor estimator that characterises it (ADR-0018). Whatever part is roughly
+static for a given user, camera and seating position is absorbed by the per-user
+ridge calibration, which exists precisely to soak up offsets we cannot measure
+directly (ADR-0006).
 
-A hallucinated boundary produces an error that is confident, **biased**, and
-correlated across frames because it is a function of the model's prior and of
-the scene content. No filter removes bias. Worse, it would break the one
-diagnostic that makes this app debuggable: ADR-0018 exists to separate accuracy
-(systematic, fixed by recalibrating) from precision (random, fixed only by
-light, distance or sensor). A hallucinating preprocessor injects an error that
-is neither — a bias that shifts with lighting, expression and screen content,
-so it survives recalibration *and* stays invisible to the scatter metric. We
-would have made the failure mode unnameable.
+A hallucinated boundary is a different animal: a confident,
+**condition-dependent bias**. It is a function of the model's prior and of the
+scene, so it is correlated across frames — averaging does not touch it — and it
+moves when the lighting, the expression or the screen content moves.
+
+The second property is the damaging one, and it is worth being precise about
+why. By ADR-0018's taxonomy this error is *systematic*: it displaces the mean,
+so it lands in the **accuracy** bucket, and the precision figure — scatter
+measured about the cloud centroid rather than the target — will not show it
+within a run held at roughly constant conditions. That much is a correct
+classification. The problem is what ADR-0018's accuracy bucket promises:
+systematic error is *"fixed by recalibrating or by a bias offset"*. A bias that
+varies with conditions breaks that promise. The diagnostic would file the error
+in the right drawer and still send the user to a remedy that cannot work —
+recalibrate, then recalibrate again, against an error that shifts every time the
+room does. A diagnostic that misroutes confidently is worse than one that says
+nothing.
 
 ### 3. Distribution shift, and un-attributable regressions
 
@@ -89,16 +101,32 @@ instrumentation built for one.
 
 The budget is one camera frame. We drive inference from
 `requestVideoFrameCallback` specifically so it runs once per *camera* frame
-rather than once per display refresh (ADR-0003), and at the requested 30 fps
-that is ~33 ms — already committed to FaceLandmarker on the same GPU delegate.
+rather than once per display refresh (ADR-0003), so at the requested 30 fps the
+frame **period** is ~33 ms.
 
-ADR-0003 sets the revisit trigger for the whole vision front end at sustained
-inference above ~12 ms/frame, and records that the CPU fallback — a real failure
-mode on some drivers — roughly triples inference cost. A preprocessing network
-contending for the same delegate would push hardest on precisely the machines
-already worst off. And frame budget is not fungible with quality elsewhere:
-ADR-0007's entire design is about buying smoothness without buying latency.
-Spending the budget upstream spends it against that.
+That is the budget, not the consumption. FaceLandmarker's share of it is
+whatever `detectForVideo` actually costs, which the renderer already tracks as a
+rolling average and shows in the status HUD — but **no figure has been recorded
+on real hardware.** Tracking quality on a real face has never been measured
+(README; issue #2), and this ADR is not going to invent a number for it.
+
+The argument does not need one, because its load-bearing terms do not depend on
+the measurement:
+
+- ADR-0003 sets the revisit trigger for the whole vision front end at sustained
+  inference above **~12 ms/frame**. That is the project's own statement of where
+  this budget starts to hurt, and a second network is not a marginal addition
+  to it.
+- GPU delegate initialization fails on some drivers, and ADR-0003 records that
+  the CPU fallback roughly **triples** inference cost. A preprocessing stage
+  contending for the same delegate would push hardest on exactly the machines
+  with the least headroom.
+- Frame budget is not fungible with quality elsewhere. ADR-0007's entire design
+  is about buying smoothness without buying latency; spending the budget
+  upstream spends it against that.
+
+If a measurement later shows generous headroom, the *weight* of this objection
+changes. Arguments 1 through 3 do not move at all.
 
 ### 5. The noise that actually matters has a cheaper fix
 
@@ -170,9 +198,23 @@ budget.
 **An end-to-end appearance-based estimator (issue #33).** If gaze becomes a
 learned function of the eye crop rather than a formula over one landmark, this
 ADR stops applying. Argument 1 disappears because the bottleneck moves, and
-preprocessing stops being a separate stage — it becomes the network's early
-layers, trained jointly against the gaze objective, which means it cannot
-produce a plausible-but-wrong iris without being penalised for it. That is a
-different thing wearing the same name. This ADR rejects a preprocessing stage
-bolted in front of a fixed detector; it does not reject learned feature
-extraction.
+preprocessing stops being a separate stage: it becomes the network's early
+layers, optimised jointly against the gaze objective rather than against
+perceptual plausibility.
+
+That is a narrower claim than it may look, and the narrowness is the point.
+Joint training removes the *specific* failure mode argument 2 describes — there
+is no longer a component whose objective is to make the iris **look** right, and
+therefore no error injected in service of looking right. It does **not**
+guarantee the network forms a correct internal representation. It will learn a
+wrong one wherever the wrong one lowers gaze loss on the training distribution,
+which is the ordinary way learned estimators fail on users and conditions they
+were not trained for. The defence against that is not the architecture, it is
+measurement: held-out evaluation on real footage — ADR-0018's validation run,
+ADR-0019's held-out targets, and the offline comparison harness issue #33
+already requires before the model may ship.
+
+So the distinction this ADR draws survives, stated honestly: it rejects a
+preprocessing stage bolted in front of a fixed detector and optimised for
+looking right. It does not reject learned feature extraction, and it does not
+claim learned feature extraction is safe by construction.
