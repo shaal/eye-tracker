@@ -36,6 +36,21 @@ export interface EyeLandmarks {
   readonly ear: readonly [number, number, number, number, number, number];
 }
 
+/**
+ * Where the upper- and lower-lid points sit inside `ear`.
+ *
+ * The EAR order is [outer, upper1, upper2, inner, lower2, lower1], so slots 1
+ * and 2 are the upper lid and slots 4 and 5 are the lower one. Slots 0 and 3
+ * are the corners, which is why `ear[0]`/`ear[3]` duplicate `corners`.
+ *
+ * Named rather than open-coded because ADR-0025 measures the vertical gaze
+ * offset against the midpoint of these two pairs, and reading `ear[4]` as an
+ * upper-lid point would invert the lid reference — a sign error that would look
+ * like a plausible-but-wrong calibration rather than like a crash.
+ */
+export const EAR_UPPER = [1, 2] as const;
+export const EAR_LOWER = [4, 5] as const;
+
 export const EYE_A: EyeLandmarks = {
   corners: [33, 133],
   irisCenter: 468,

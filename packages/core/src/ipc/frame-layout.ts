@@ -37,9 +37,19 @@ export const FRAME_SLOTS = {
   OPEN_RIGHT: 13,
   BLINK_LEFT: 14,
   BLINK_RIGHT: 15,
+  /**
+   * The vertical iris offset measured against the eyelid aperture centre
+   * instead of the eye-corner midpoint (ADR-0025).
+   *
+   * Sent alongside `GY` rather than replacing it, deliberately. Which basis the
+   * calibration fit consumes is a Rust-side switch, so shipping both means the
+   * A/B costs one `f64` per frame instead of a rebuild — and a session recorded
+   * today can answer the question offline for either basis.
+   */
+  GY_APERTURE: 16,
 } as const;
 
-export const FRAME_WIDTH = 16;
+export const FRAME_WIDTH = 17;
 
 export type FrameSlot = (typeof FRAME_SLOTS)[keyof typeof FRAME_SLOTS];
 

@@ -95,6 +95,11 @@ const CALIBRATION: CalibrationReport = {
   meanWeight: 0.8123,
   minWeight: 0.4012,
   effectiveSamples: 231.44,
+  verticalBasis: 'aperture',
+  opennessTerms: false,
+  axisSpecific: false,
+  openRef: 0.3117,
+  verticalRangeFraction: 0.91,
 };
 
 const TUNING: Record<string, unknown> = {
@@ -122,6 +127,9 @@ const TUNING: Record<string, unknown> = {
   takeoverRequireManualResume: false,
   qualityWeighting: true,
   weightFloor: 0.25,
+  apertureVertical: true,
+  opennessTerms: false,
+  axisSpecificVertical: false,
   pxPerDegree: 42.1,
 };
 
@@ -313,6 +321,10 @@ test('the A/B switches are a projection of the engine tuning and cannot disagree
   assert.equal(b.abSwitches['confidenceTrust'], true);
   assert.equal(b.abSwitches['weightFloor'], 0.25);
   assert.equal(b.abSwitches['trustFloor'], 0.35);
+  // …and the three ADR-0025 shipped for the same reason.
+  assert.equal(b.abSwitches['apertureVertical'], true);
+  assert.equal(b.abSwitches['opennessTerms'], false);
+  assert.equal(b.abSwitches['axisSpecificVertical'], false);
 });
 
 test('two bundles differing only in one flag differ in only a few lines', () => {
@@ -472,6 +484,75 @@ test('the summary reports accuracy and precision separately, never blended', () 
   assert.match(text, /\/tmp\/diagnostics\.json/);
   // Short enough to paste into a comment box and actually be read.
   assert.ok(text.split('\n').length < 45, `summary is ${text.split('\n').length} lines`);
+});
+
+/**
+ * The failure #48 fixed, one step downstream: a switch that is settable but
+ * invisible.
+ *
+ * The clipboard summary is the artefact that gets pasted into an issue, and the
+ * entire purpose of the next hardware session is comparing aperture-on against
+ * aperture-off. A summary that does not state which mode produced the numbers
+ * makes that comparison unreadable — and it fails silently, which is why this is
+ * asserted rather than left to review.
+ */
+test('the summary states every A/B switch, including the vertical feature ones', () => {
+  const text = formatBundleSummary(buildDiagnosticsBundle(input()));
+  for (const key of AB_SWITCH_KEYS) {
+    assert.match(text, new RegExp(`\\b${key}=`), `${key} is settable but invisible in the summary`);
+  }
+  assert.match(text, /apertureVertical=on/);
+  assert.match(text, /opennessTerms=off/);
+  assert.match(text, /axisSpecificVertical=off/);
+});
+
+/**
+ * The primary metric of #57 has to be findable by someone skimming, because it
+ * is the one number that separates "the vertical channel is inaccurate" from
+ * "the vertical channel returns a constant" — a distinction mean error cannot
+ * make at all.
+ */
+test('the summary leads the fit with the vertical range fraction', () => {
+  const text = formatBundleSummary(buildDiagnosticsBundle(input()));
+  assert.match(text, /VERTICAL RANGE 0\.91 of target span/);
+  assert.match(text, /fitted on the aperture basis/);
+});
+
+/**
+ * A switch changes what the *next* calibration is fitted on and does nothing to
+ * a model already loaded, so "engine set to aperture, profile fitted on corner"
+ * is a normal state a user will pass through — and one where the numbers on
+ * screen belong to the *other* mode.
+ *
+ * Reading that as a successful A/B is the specific mistake this warning exists
+ * to prevent, and nothing else in the bundle would reveal it.
+ */
+test('the summary flags a profile fitted under different switches than the engine now has', () => {
+  const stale = formatBundleSummary(
+    buildDiagnosticsBundle(
+      input({ calibration: { ...CALIBRATION, verticalBasis: 'corner', axisSpecific: true } }),
+    ),
+  );
+  assert.match(stale, /STALE: this profile was fitted on the corner basis/);
+  assert.match(stale, /set to aperture/);
+  assert.match(stale, /reduced vertical column set is off now but was on/);
+
+  // …and stays quiet when they agree, or the warning becomes wallpaper.
+  const agreeing = formatBundleSummary(buildDiagnosticsBundle(input()));
+  assert.doesNotMatch(agreeing, /STALE/);
+});
+
+/**
+ * A profile from before ADR-0025 does not record what it was fitted with, and
+ * the honest response to that is silence rather than a comparison against a
+ * value we would have had to invent.
+ */
+test('a profile that predates the vertical switches is not compared against them', () => {
+  const { verticalBasis, opennessTerms, axisSpecific, openRef, verticalRangeFraction, ...old } =
+    CALIBRATION;
+  const text = formatBundleSummary(buildDiagnosticsBundle(input({ calibration: old })));
+  assert.doesNotMatch(text, /STALE/);
+  assert.match(text, /not recorded basis/);
 });
 
 test('the file name sorts chronologically and is readable in a listing', () => {

@@ -1,6 +1,6 @@
 # ADR-0005: Roll-invariant, scale-free iris feature vector
 
-- **Status:** Accepted
+- **Status:** Accepted (vertical reference amended by [ADR-0025](0025-aperture-relative-vertical-gaze.md))
 - **Date:** 2026-07-24
 
 ## Context

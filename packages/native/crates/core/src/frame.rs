@@ -8,7 +8,7 @@ use crate::blink::gesture::Closure;
 
 /// Number of `f64` slots in one packed frame. Must equal `FRAME_WIDTH` in
 /// `packages/core/src/ipc/frame-layout.ts`.
-pub const FRAME_WIDTH: usize = 16;
+pub const FRAME_WIDTH: usize = 17;
 
 pub mod slot {
     pub const TIMESTAMP: usize = 0;
@@ -29,6 +29,10 @@ pub mod slot {
     pub const OPEN_RIGHT: usize = 13;
     pub const BLINK_LEFT: usize = 14;
     pub const BLINK_RIGHT: usize = 15;
+    /// Vertical iris offset against the eyelid aperture centre rather than the
+    /// eye-corner midpoint (ADR-0025). Shipped alongside `GY`, not instead of
+    /// it, so the two vertical bases can be A/B'd without a rebuild.
+    pub const GY_APERTURE: usize = 16;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,8 +72,10 @@ pub struct GazeFrame {
 
     /// Mean normalized horizontal iris offset — primary gaze signal.
     pub gx: f64,
-    /// Mean normalized vertical iris offset.
+    /// Mean normalized vertical iris offset, against the eye-corner midpoint.
     pub gy: f64,
+    /// The same offset against the eyelid aperture centre (ADR-0025).
+    pub gy_aperture: f64,
     /// abs(gxA - gxB), vergence proxy.
     pub dgx: f64,
 
@@ -107,6 +113,7 @@ impl GazeFrame {
             quality: s[slot::QUALITY],
             gx: s[slot::GX],
             gy: s[slot::GY],
+            gy_aperture: s[slot::GY_APERTURE],
             dgx: s[slot::DGX],
             yaw: s[slot::YAW],
             pitch: s[slot::PITCH],
@@ -201,6 +208,19 @@ mod tests {
         assert_eq!(f.closure().both(), 0.3);
         // But it does count as "an eyelid is moving", for the cursor freeze.
         assert_eq!(f.closure().any(), 0.7);
+    }
+
+    /// The two vertical bases occupy different slots and must not be confused:
+    /// decoding `gy_aperture` from the `GY` slot would make the ADR-0025 switch
+    /// a no-op that still passed every other test.
+    #[test]
+    fn the_two_vertical_bases_decode_from_their_own_slots() {
+        let mut v = valid();
+        v[slot::GY] = -0.2;
+        v[slot::GY_APERTURE] = 0.35;
+        let f = GazeFrame::decode(&v).unwrap();
+        assert_eq!(f.gy, -0.2);
+        assert_eq!(f.gy_aperture, 0.35);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Calibration sample collection and outlier rejection (ADR-0006).
 
 use super::fit::{fit_with, CalibSample, CalibrationError};
-use super::model::CalibrationModel;
+use super::model::{CalibrationModel, VerticalBasis};
 use crate::config::CalibrationConfig;
 use crate::frame::GazeFrame;
 use crate::math::Vec2;
@@ -103,7 +103,11 @@ impl Collector {
     /// The keep/drop decision and the scatter plot must agree exactly, so both
     /// are derived from this one pass rather than from two copies of the same
     /// threshold logic.
-    fn partition(&self) -> Vec<(CalibSample, bool)> {
+    fn partition(&self, basis: VerticalBasis) -> Vec<(CalibSample, bool)> {
+        let gy_of = |s: &CalibSample| match basis {
+            VerticalBasis::Corner => s.frame.gy,
+            VerticalBasis::Aperture => s.frame.gy_aperture,
+        };
         let mut out = Vec::with_capacity(self.samples.len());
 
         for (idx, _) in self.targets.iter().enumerate() {
@@ -116,19 +120,19 @@ impl Collector {
             }
 
             let med_x = median(&mut group.iter().map(|s| s.frame.gx).collect::<Vec<_>>());
-            let med_y = median(&mut group.iter().map(|s| s.frame.gy).collect::<Vec<_>>());
+            let med_y = median(&mut group.iter().map(|s| gy_of(s)).collect::<Vec<_>>());
             let mad_x = median(
                 &mut group.iter().map(|s| (s.frame.gx - med_x).abs()).collect::<Vec<_>>(),
             )
             .max(MAD_FLOOR);
             let mad_y = median(
-                &mut group.iter().map(|s| (s.frame.gy - med_y).abs()).collect::<Vec<_>>(),
+                &mut group.iter().map(|s| (gy_of(s) - med_y).abs()).collect::<Vec<_>>(),
             )
             .max(MAD_FLOOR);
 
             for s in group {
                 let dx = (s.frame.gx - med_x).abs() / mad_x;
-                let dy = (s.frame.gy - med_y).abs() / mad_y;
+                let dy = (gy_of(s) - med_y).abs() / mad_y;
                 out.push((*s, dx <= MAD_REJECT && dy <= MAD_REJECT));
             }
         }
@@ -139,17 +143,26 @@ impl Collector {
     /// Drop per-target outliers by median absolute deviation on the gaze
     /// features. A user glancing away mid-target produces samples that would
     /// otherwise drag the whole fit.
-    fn filtered_samples(&self) -> Vec<CalibSample> {
-        self.partition().into_iter().filter(|(_, kept)| *kept).map(|(s, _)| s).collect()
+    fn filtered_samples(&self, basis: VerticalBasis) -> Vec<CalibSample> {
+        self.partition(basis).into_iter().filter(|(_, kept)| *kept).map(|(s, _)| s).collect()
     }
 
     /// Every collected sample in gaze-feature space, for the debug scatter.
-    pub fn scatter(&self) -> Vec<ScatterPoint> {
-        self.partition()
+    ///
+    /// `basis` must be the one the fit will use (ADR-0025). The scatter answers
+    /// "did the input signal separate the targets at all?", and plotting the
+    /// corner-relative `gy` beside a fit made on the aperture-relative one would
+    /// answer it about a feature the model never saw — which is worse than
+    /// showing nothing, because it looks like an answer.
+    pub fn scatter(&self, basis: VerticalBasis) -> Vec<ScatterPoint> {
+        self.partition(basis)
             .into_iter()
             .map(|(s, kept)| ScatterPoint {
                 gx: s.frame.gx,
-                gy: s.frame.gy,
+                gy: match basis {
+                    VerticalBasis::Corner => s.frame.gy,
+                    VerticalBasis::Aperture => s.frame.gy_aperture,
+                },
                 target_index: s.target_index,
                 kept,
             })
@@ -175,8 +188,19 @@ impl Collector {
         px_per_degree: f64,
         display_fingerprint: impl Into<String>,
     ) -> Result<CalibrationModel, CalibrationError> {
-        let samples = self.filtered_samples();
+        let samples = self.filtered_samples(basis_of(cfg));
         fit_with(&samples, cfg, px_per_degree, display_fingerprint)
+    }
+}
+
+/// The vertical basis a config implies (ADR-0025). One place, so the outlier
+/// filter, the debug scatter and the fit can never disagree about which `gy`
+/// they mean.
+pub fn basis_of(cfg: &CalibrationConfig) -> VerticalBasis {
+    if cfg.aperture_vertical {
+        VerticalBasis::Aperture
+    } else {
+        VerticalBasis::Corner
     }
 }
 
@@ -243,7 +267,7 @@ mod tests {
         c.add(0, frame(0.90, -0.80), false, 0.4);
         c.add(0, frame(0.85, -0.75), false, 0.4);
 
-        let kept = c.filtered_samples();
+        let kept = c.filtered_samples(VerticalBasis::Corner);
         assert_eq!(kept.len(), 30, "outliers were not rejected");
         assert!(kept.iter().all(|s| s.frame.gx < 0.5));
     }
@@ -259,9 +283,12 @@ mod tests {
         }
         c.add(0, frame(0.90, -0.80), false, 0.4);
 
-        let scatter = c.scatter();
+        let scatter = c.scatter(VerticalBasis::Corner);
         assert_eq!(scatter.len(), 31, "scatter must include rejected samples");
-        assert_eq!(scatter.iter().filter(|p| p.kept).count(), c.filtered_samples().len());
+        assert_eq!(
+            scatter.iter().filter(|p| p.kept).count(),
+            c.filtered_samples(VerticalBasis::Corner).len()
+        );
         assert!(scatter.iter().any(|p| !p.kept && p.gx > 0.5), "the glance-away must be flagged");
         assert!(scatter.iter().all(|p| p.target_index == 0));
     }
@@ -272,7 +299,7 @@ mod tests {
         for i in 0..4 {
             c.add(0, frame(0.1 * i as f64, 0.0), false, 0.4);
         }
-        assert_eq!(c.filtered_samples().len(), 4);
+        assert_eq!(c.filtered_samples(VerticalBasis::Corner).len(), 4);
     }
 
     #[test]

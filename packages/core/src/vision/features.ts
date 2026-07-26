@@ -9,6 +9,8 @@
 import {
   BLINK_SHAPE_LEFT,
   BLINK_SHAPE_RIGHT,
+  EAR_LOWER,
+  EAR_UPPER,
   EYE_A,
   EYE_B,
   NOSE_TIP,
@@ -47,6 +49,15 @@ export interface EyeMeasure {
   /** Normalized iris offset along the eye's own axis. */
   gx: number;
   gy: number;
+  /**
+   * The same vertical offset, but measured against the eyelid aperture centre
+   * rather than the corner midpoint (ADR-0025).
+   *
+   * Both are emitted every frame. Which one the calibration fit consumes is a
+   * runtime switch on the Rust side, so the two can be A/B'd — and so a
+   * recorded session carries the evidence for both.
+   */
+  gyAperture: number;
   /** Eye width in frame units — the normalizer. */
   width: number;
   centerX: number;
@@ -65,6 +76,8 @@ export interface GazeFeatures {
   quality: number;
   gx: number;
   gy: number;
+  /** Mean aperture-relative vertical offset (ADR-0025). */
+  gyAperture: number;
   dgx: number;
   yaw: number;
   pitch: number;
@@ -106,6 +119,13 @@ function clamp(v: number, lo: number, hi: number): number {
  * inner→outer ordering would give the two eyes ANTI-PARALLEL basis vectors,
  * and averaging their `gx` would cancel the signal instead of reinforcing it.
  * Ordering by x makes both bases point the same way in image space.
+ *
+ * Two vertical offsets come out of this, against two different references
+ * (ADR-0025). `gy` is measured against the corner midpoint, which is anchored
+ * to the socket and does not move when the lid drops. `gyAperture` is measured
+ * against the midpoint of the two lid margins, which does. Both use the same
+ * basis vector `v` and the same normalizer, so both keep ADR-0005's roll and
+ * scale invariance; only the origin differs.
  */
 function measureEye(lm: readonly Landmark[], eye: EyeLandmarks): EyeMeasure | null {
   const c0 = lm[eye.corners[0]];
@@ -145,7 +165,37 @@ function measureEye(lm: readonly Landmark[], eye: EyeLandmarks): EyeMeasure | nu
     }
   }
 
-  return { gx, gy, width, centerX, centerY, ux, uy, irisX: iris.x, irisY: iris.y, openness };
+  // The lid aperture centre: the midpoint of the upper- and lower-lid margins.
+  //
+  // Falls back to `gy` when any lid landmark is missing rather than to some
+  // partial aperture, because a half-populated reference is a silently wrong
+  // number and `gy` is at least a known quantity.
+  const up0 = lm[eye.ear[EAR_UPPER[0]]];
+  const up1 = lm[eye.ear[EAR_UPPER[1]]];
+  const lo0 = lm[eye.ear[EAR_LOWER[0]]];
+  const lo1 = lm[eye.ear[EAR_LOWER[1]]];
+  let gyAperture = gy;
+  if (up0 && up1 && lo0 && lo1) {
+    const apertureX = (up0.x + up1.x + lo0.x + lo1.x) / 4;
+    const apertureY = (up0.y + up1.y + lo0.y + lo1.y) / 4;
+    const ax = iris.x - apertureX;
+    const ay = iris.y - apertureY;
+    gyAperture = (ax * vx + ay * vy) / width;
+  }
+
+  return {
+    gx,
+    gy,
+    gyAperture,
+    width,
+    centerX,
+    centerY,
+    ux,
+    uy,
+    irisX: iris.x,
+    irisY: iris.y,
+    openness,
+  };
 }
 
 /**
@@ -214,6 +264,7 @@ function estimateQuality(
 const NO_EYE: EyeMeasure = {
   gx: 0,
   gy: 0,
+  gyAperture: 0,
   width: 0,
   centerX: 0,
   centerY: 0,
@@ -229,6 +280,7 @@ export const NO_FACE: GazeFeatures = {
   quality: 0,
   gx: 0,
   gy: 0,
+  gyAperture: 0,
   dgx: 0,
   yaw: 0,
   pitch: 0,
@@ -262,6 +314,7 @@ export function extractFeatures(input: FaceInput, options: FeatureOptions = {}):
   // rather than cancels. Symmetric under an A/B swap by construction.
   const gx = (a.gx + b.gx) / 2;
   const gy = (a.gy + b.gy) / 2;
+  const gyAperture = (a.gyAperture + b.gyAperture) / 2;
   const dgx = Math.abs(a.gx - b.gx);
 
   const hx = nose.x - 0.5;
@@ -292,6 +345,7 @@ export function extractFeatures(input: FaceInput, options: FeatureOptions = {}):
     quality,
     gx,
     gy,
+    gyAperture,
     dgx,
     yaw,
     pitch,
@@ -323,6 +377,7 @@ export function packFrame(out: Float64Array, tMs: number, f: GazeFeatures): Floa
   out[FRAME_SLOTS.QUALITY] = f.quality;
   out[FRAME_SLOTS.GX] = f.gx;
   out[FRAME_SLOTS.GY] = f.gy;
+  out[FRAME_SLOTS.GY_APERTURE] = f.gyAperture;
   out[FRAME_SLOTS.DGX] = f.dgx;
   out[FRAME_SLOTS.YAW] = f.yaw;
   out[FRAME_SLOTS.PITCH] = f.pitch;

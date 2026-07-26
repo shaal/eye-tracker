@@ -160,9 +160,46 @@ export interface CalibrationReport {
    * session, 180 of 253 means a lot of the data was being trusted much less.
    */
   effectiveSamples?: number;
+  /**
+   * Which reference the `gy` column was measured against (ADR-0025), and the
+   * four below it.
+   *
+   * Optional for the same reason as the four above: a profile saved before
+   * ADR-0025 carries none of them, and absent means the pre-ADR-0025 answer —
+   * the corner basis, no openness terms, no reduced vertical axis.
+   */
+  verticalBasis?: 'corner' | 'aperture';
+  opennessTerms?: boolean;
+  axisSpecific?: boolean;
+  /** Calibration-time openness normalizer; NaN when the terms were off. */
+  openRef?: number;
+  /**
+   * Predicted vertical spread over the calibration targets, as a fraction of
+   * the targets' own vertical spread.
+   *
+   * **The number #57 asked to see reported.** It separates a collapsed vertical
+   * channel — which returns near 0 however far the user looks — from a merely
+   * biased one, which still spans the screen. Mean error cannot tell those
+   * apart; this can.
+   */
+  verticalRangeFraction?: number;
 }
 
 export interface CalibrationProfile {
+  /**
+   * Which feature semantics the coefficients were fitted against (ADR-0025).
+   * Absent means version 1 — everything before ADR-0025.
+   *
+   * The native side refuses a profile whose version it does not understand.
+   * Without it, changing the vertical reference would reinterpret a stored
+   * profile's columns without changing any vector's length, and the result
+   * would look like drift rather than like a mismatch.
+   */
+  featureVersion?: number;
+  /** The reference `gy` was measured against. */
+  verticalBasis?: 'corner' | 'aperture';
+  /** Calibration-time openness normalizer, when the openness terms are in use. */
+  openRef?: number;
   tier: string;
   mean: number[];
   scale: number[];
@@ -273,6 +310,16 @@ export interface TuningPatch {
     qualityWeighting: boolean;
     /** Lower bound on a sample's weight, so marginal is discounted, not deleted. */
     weightFloor: number;
+    /**
+     * Measure vertical gaze against the eyelid aperture centre instead of the
+     * eye-corner midpoint (ADR-0025). Off restores ADR-0005's original
+     * vertical reference exactly.
+     */
+    apertureVertical: boolean;
+    /** Add the openness pair `o` and `gy·o` to the expansion (ADR-0025). */
+    opennessTerms: boolean;
+    /** Fit the vertical axis on a reduced column set (ADR-0025). */
+    axisSpecificVertical: boolean;
   }>;
   pxPerDegree?: number;
 }
