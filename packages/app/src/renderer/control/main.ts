@@ -565,12 +565,24 @@ window.eyeTracker.onCalibrationUi(async (c) => {
 
       const quality =
         report.meanErrorDeg < 1.5 ? 'good' : report.meanErrorDeg < 2.5 ? 'usable' : 'poor';
+      // Samples are weighted by tracking quality, so "how many frames" is no
+      // longer the whole story — a session of marginal frames is worth fewer
+      // than it collected, and that is a different diagnosis for a mediocre
+      // error than a bad fit (ADR-0021).
+      const weights =
+        report.qualityWeighted && report.meanWeight !== undefined
+          ? `<div>Sample quality: mean ${report.meanWeight.toFixed(2)}, worst
+              ${(report.minWeight ?? 0).toFixed(2)} — worth
+              ${Math.round(report.effectiveSamples ?? report.samples)} of
+              ${report.samples} frames</div>`
+          : '';
       calReport.innerHTML = `
         <strong>Calibration ${quality}</strong>
         <div>Held-out error: <b>${report.meanErrorPx.toFixed(0)} px</b>
           (~${report.meanErrorDeg.toFixed(2)}°)</div>
         <div>95th percentile: ${report.p95ErrorPx.toFixed(0)} px</div>
         <div>Model: ${report.tierName}, ${report.samples} samples, ${report.targets} targets</div>
+        ${weights}
         <div class="hint">${
           report.crossValidated
             ? 'Cross-validated — this is a genuine held-out estimate.'

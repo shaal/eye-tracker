@@ -1,6 +1,6 @@
 # ADR-0006: Gaze→screen mapping by regularized polynomial regression
 
-- **Status:** Accepted (λ selection superseded in part by [ADR-0019](0019-lambda-by-held-out-target.md))
+- **Status:** Accepted (λ selection superseded in part by [ADR-0019](0019-lambda-by-held-out-target.md); sample weighting added by [ADR-0021](0021-quality-weighted-calibration-fit.md))
 - **Date:** 2026-07-24
 
 ## Context

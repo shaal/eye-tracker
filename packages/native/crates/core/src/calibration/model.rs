@@ -197,6 +197,28 @@ pub struct CalibrationReport {
     /// False when there were too few targets to hold one out, in which case the
     /// errors above are training errors and are optimistic.
     pub cross_validated: bool,
+
+    // --- sample weighting (ADR-0021) ---
+    /// Whether tracking quality weighted the fit. False means every admitted
+    /// sample counted the same, the pre-ADR-0021 behaviour.
+    pub quality_weighted: bool,
+    /// Mean regression weight. With weighting on this is the mean tracking
+    /// quality of the samples that survived the gate and the outlier filter, so
+    /// it is the one number that answers "were my samples mostly good?".
+    pub mean_weight: f64,
+    /// The weight of the worst sample that still made it into the fit. A value
+    /// at the floor means at least one frame was scraped in barely above
+    /// `min_quality`.
+    pub min_weight: f64,
+    /// Kish's effective sample size, `(Σw)² / Σw²`.
+    ///
+    /// How many evenly-weighted frames carry the same information as the
+    /// weighted set. Compared against `samples` it is the single number that
+    /// says whether the weight spread was material at all: 250 of 253 means the
+    /// session was uniformly good and weighting changed nothing; 180 of 253
+    /// means a substantial part of the data was being trusted far less than the
+    /// rest.
+    pub effective_samples: f64,
 }
 
 #[cfg(test)]

@@ -178,6 +178,42 @@ impl Default for GuardConfig {
     }
 }
 
+/// How the calibration fit treats the samples it was given (ADR-0021).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibrationConfig {
+    /// Weight each sample by its tracking quality in the ridge fit, instead of
+    /// letting every admitted sample count the same.
+    ///
+    /// `min_quality` only decides *whether* a sample is used. Without this, a
+    /// frame scraped in at 0.41 — head turned, eye half-closed, user sitting
+    /// far back — has exactly as much say in the fitted model as a clean one at
+    /// 0.95, and it is precisely the marginal frame whose association with the
+    /// target is least trustworthy.
+    ///
+    /// Switchable so the change can be A/B'd against the old behaviour on real
+    /// hardware; turning it off reproduces the unweighted fit exactly.
+    pub quality_weighting: bool,
+    /// Lower bound on the per-sample weight.
+    ///
+    /// A weight of zero deletes a sample, and deletion is not what we mean:
+    /// admission is already decided by `GuardConfig::min_quality`, so anything
+    /// reaching the fit has been judged usable. The floor keeps the worst
+    /// admitted sample discounted rather than discarded, and bounds how far the
+    /// weights can spread — with the default gate at 0.4 the widest possible
+    /// ratio between two samples is 2.5:1.
+    ///
+    /// Inert at the default gate (0.4 > 0.25); it starts to bite only for a
+    /// user who has loosened `min_quality`, which is exactly when an unbounded
+    /// discount would be dangerous.
+    pub weight_floor: f64,
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self { quality_weighting: true, weight_floor: 0.25 }
+    }
+}
+
 /// Yielding to a physical mouse or trackpad (ADR-0016).
 ///
 /// This is a safety property as much as a convenience one: if the tracker is
@@ -214,6 +250,7 @@ pub struct EngineConfig {
     pub blink: BlinkConfig,
     pub guard: GuardConfig,
     pub takeover: TakeoverConfig,
+    pub calibration: CalibrationConfig,
     /// Pixels per degree of visual angle, for reporting calibration accuracy in
     /// familiar units. Default assumes ~110 PPI at ~600 mm viewing distance.
     pub px_per_degree: f64,
@@ -226,6 +263,7 @@ impl Default for EngineConfig {
             blink: BlinkConfig::default(),
             guard: GuardConfig::default(),
             takeover: TakeoverConfig::default(),
+            calibration: CalibrationConfig::default(),
             px_per_degree: 45.0,
         }
     }

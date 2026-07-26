@@ -107,12 +107,25 @@ pub struct TakeoverConfigPatch {
     pub require_manual_resume: Option<bool>,
 }
 
+/// How the calibration fit treats the samples it was given (ADR-0021).
+#[napi(object)]
+pub struct CalibrationConfigPatch {
+    /// Weight each sample by its tracking quality instead of counting every
+    /// admitted sample the same. Off reproduces the pre-ADR-0021 fit exactly,
+    /// which is what makes this A/B-able.
+    pub quality_weighting: Option<bool>,
+    /// Lower bound on a sample's weight, so a marginal-but-admitted sample is
+    /// discounted rather than deleted.
+    pub weight_floor: Option<f64>,
+}
+
 #[napi(object)]
 pub struct EngineConfigPatch {
     pub filter: Option<FilterConfigPatch>,
     pub blink: Option<BlinkConfigPatch>,
     pub guard: Option<GuardConfigPatch>,
     pub takeover: Option<TakeoverConfigPatch>,
+    pub calibration: Option<CalibrationConfigPatch>,
     pub px_per_degree: Option<f64>,
 }
 
@@ -149,6 +162,9 @@ fn apply_patch(cfg: &mut core::EngineConfig, p: &EngineConfigPatch) {
     }
     if let Some(tk) = &p.takeover {
         patch!(cfg.takeover, tk, enabled, epsilon_px, resume_after_ms, require_manual_resume);
+    }
+    if let Some(c) = &p.calibration {
+        patch!(cfg.calibration, c, quality_weighting, weight_floor);
     }
     if let Some(v) = p.px_per_degree {
         cfg.px_per_degree = v;
@@ -190,6 +206,8 @@ pub struct EngineConfigView {
     pub takeover_epsilon_px: f64,
     pub takeover_resume_after_ms: f64,
     pub takeover_require_manual_resume: bool,
+    pub quality_weighting: bool,
+    pub weight_floor: f64,
     pub px_per_degree: f64,
 }
 
@@ -228,6 +246,8 @@ impl From<&core::EngineConfig> for EngineConfigView {
             takeover_epsilon_px: c.takeover.epsilon_px,
             takeover_resume_after_ms: c.takeover.resume_after_ms,
             takeover_require_manual_resume: c.takeover.require_manual_resume,
+            quality_weighting: c.calibration.quality_weighting,
+            weight_floor: c.calibration.weight_floor,
             px_per_degree: c.px_per_degree,
         }
     }
@@ -327,6 +347,19 @@ pub struct CalibrationReportJs {
     /// False when there were too few targets to hold one out, in which case the
     /// errors are training errors and are optimistic.
     pub cross_validated: bool,
+    /// Whether tracking quality weighted the fit (ADR-0021).
+    ///
+    /// Optional, like the three below it, because a profile saved before
+    /// ADR-0021 has none of these fields, and a stored calibration must not
+    /// become unloadable just because the report grew.
+    pub quality_weighted: Option<bool>,
+    /// Mean sample weight — "were my samples mostly good?".
+    pub mean_weight: Option<f64>,
+    /// Weight of the worst sample that still made it into the fit.
+    pub min_weight: Option<f64>,
+    /// Kish's effective sample size. Compare against `samples` to see whether
+    /// the weight spread was material.
+    pub effective_samples: Option<f64>,
 }
 
 impl From<&CalibrationReport> for CalibrationReportJs {
@@ -342,6 +375,10 @@ impl From<&CalibrationReport> for CalibrationReportJs {
             lambda_x: r.lambda_x,
             lambda_y: r.lambda_y,
             cross_validated: r.cross_validated,
+            quality_weighted: Some(r.quality_weighted),
+            mean_weight: Some(r.mean_weight),
+            min_weight: Some(r.min_weight),
+            effective_samples: Some(r.effective_samples),
         }
     }
 }
@@ -450,6 +487,15 @@ impl TryFrom<&CalibrationModelJs> for CalibrationModel {
                 lambda_x: m.report.lambda_x,
                 lambda_y: m.report.lambda_y,
                 cross_validated: m.report.cross_validated,
+                // A pre-ADR-0021 profile was fitted unweighted, so that is
+                // exactly what the absent fields mean.
+                quality_weighted: m.report.quality_weighted.unwrap_or(false),
+                mean_weight: m.report.mean_weight.unwrap_or(1.0),
+                min_weight: m.report.min_weight.unwrap_or(1.0),
+                effective_samples: m
+                    .report
+                    .effective_samples
+                    .unwrap_or(m.report.samples as f64),
             },
             display_fingerprint: m.display_fingerprint.clone(),
         })
