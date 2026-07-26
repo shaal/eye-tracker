@@ -8,7 +8,7 @@ green build says nothing about whether the tracker actually tracks.
 
 | Check | Command | Result |
 | ----- | ------- | ------ |
-| Rust core unit tests | `npm run test:native` | 135 passing |
+| Rust core unit tests | `npm run test:native` | 150 passing |
 | Native addon loads in Node | `npm run smoke:mouse` | backend `macos-cgevent`, Accessibility granted |
 | TypeScript across all packages | `npm run typecheck` | clean |
 | Full bundle build | `npm run build` | main + preload + 2 renderers + assets |

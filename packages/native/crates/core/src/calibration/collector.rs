@@ -1,7 +1,8 @@
 //! Calibration sample collection and outlier rejection (ADR-0006).
 
-use super::fit::{fit, CalibSample, CalibrationError};
+use super::fit::{fit_with, CalibSample, CalibrationError};
 use super::model::CalibrationModel;
+use crate::config::CalibrationConfig;
 use crate::frame::GazeFrame;
 use crate::math::Vec2;
 
@@ -155,14 +156,27 @@ impl Collector {
             .collect()
     }
 
-    /// Fit the model from everything collected.
+    /// Fit the model from everything collected, with the default fit config.
     pub fn finish(
         &self,
         px_per_degree: f64,
         display_fingerprint: impl Into<String>,
     ) -> Result<CalibrationModel, CalibrationError> {
+        self.finish_with(&CalibrationConfig::default(), px_per_degree, display_fingerprint)
+    }
+
+    /// Fit the model from everything collected.
+    ///
+    /// `min_quality` decided which samples got in here; `cfg` decides how much
+    /// each of them then counts for (ADR-0021).
+    pub fn finish_with(
+        &self,
+        cfg: &CalibrationConfig,
+        px_per_degree: f64,
+        display_fingerprint: impl Into<String>,
+    ) -> Result<CalibrationModel, CalibrationError> {
         let samples = self.filtered_samples();
-        fit(&samples, px_per_degree, display_fingerprint)
+        fit_with(&samples, cfg, px_per_degree, display_fingerprint)
     }
 }
 
@@ -279,6 +293,37 @@ mod tests {
         assert!(model.report.cross_validated);
         assert!(model.report.mean_error_px.is_finite());
         assert_eq!(model.display_fingerprint, "fingerprint");
+    }
+
+    /// Quality has two distinct jobs and they must not be confused: the gate
+    /// decides *whether* a frame is used, the weight decides *how much*. A
+    /// frame at 0.5 with the gate at 0.4 is admitted — and then carries half
+    /// the say of a clean one, rather than the same say (ADR-0021).
+    #[test]
+    fn admitted_but_marginal_samples_reach_the_fit_discounted() {
+        let targets = nine_targets();
+        let mut c = Collector::new(targets.clone());
+        for (idx, t) in targets.iter().enumerate() {
+            let gx = (t.x - 900.0) / 3000.0;
+            let gy = (t.y - 550.0) / 2400.0;
+            for k in 0..25 {
+                let jitter = (k as f64 % 5.0 - 2.0) * 0.0008;
+                let mut f = frame(gx + jitter, gy - jitter);
+                // One target was collected while the user sat badly.
+                f.quality = if idx == 6 { 0.5 } else { 1.0 };
+                c.add(idx, f, false, 0.4);
+            }
+        }
+
+        let cfg = CalibrationConfig::default();
+        let weighted = c.finish_with(&cfg, 45.0, "fp").expect("fit should succeed");
+        assert_eq!(weighted.report.min_weight, 0.5);
+        assert!(weighted.report.effective_samples < weighted.report.samples as f64);
+
+        let off = CalibrationConfig { quality_weighting: false, ..cfg };
+        let plain = c.finish_with(&off, 45.0, "fp").expect("fit should succeed");
+        assert_eq!(plain.report.min_weight, 1.0);
+        assert_ne!(plain.beta_x, weighted.beta_x, "the weights should have moved the fit");
     }
 
     #[test]

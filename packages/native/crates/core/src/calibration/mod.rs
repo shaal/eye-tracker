@@ -3,7 +3,7 @@ pub mod fit;
 pub mod model;
 
 pub use collector::{Collector, SampleRejection, ScatterPoint};
-pub use fit::{fit, CalibSample, CalibrationError};
+pub use fit::{fit, fit_with, CalibSample, CalibrationError};
 pub use model::{CalibrationModel, CalibrationReport, FeatureTier, MAX_FEATURES};
 
 use crate::math::{Rect, Vec2};

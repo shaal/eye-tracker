@@ -24,7 +24,7 @@ pub mod frame;
 pub mod math;
 pub mod mouse;
 
-pub use config::{BlinkConfig, EngineConfig, FilterConfig, GuardConfig};
+pub use config::{BlinkConfig, CalibrationConfig, EngineConfig, FilterConfig, GuardConfig};
 pub use engine::{Engine, EngineError, FrameOutput, Guard};
 pub use frame::{GazeFrame, FRAME_WIDTH};
 pub use math::{Rect, Vec2};

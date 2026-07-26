@@ -122,6 +122,23 @@ export interface CalibrationReport {
   lambdaX: number;
   lambdaY: number;
   crossValidated: boolean;
+  /**
+   * Whether tracking quality weighted the fit (ADR-0021).
+   *
+   * These four are optional because a profile saved before ADR-0021 does not
+   * carry them; absent means the fit was unweighted.
+   */
+  qualityWeighted?: boolean;
+  /** Mean sample weight — "were my samples mostly good?". */
+  meanWeight?: number;
+  /** Weight of the worst sample that still made it into the fit. */
+  minWeight?: number;
+  /**
+   * Kish's effective sample size, `(Σw)² / Σw²`. Against `samples` it says
+   * whether the weight spread was material: 250 of 253 means a uniformly good
+   * session, 180 of 253 means a lot of the data was being trusted much less.
+   */
+  effectiveSamples?: number;
 }
 
 export interface CalibrationProfile {
@@ -221,6 +238,13 @@ export interface TuningPatch {
     epsilonPx: number;
     resumeAfterMs: number;
     requireManualResume: boolean;
+  }>;
+  /** How the calibration fit treats the samples it was given (ADR-0021). */
+  calibration?: Partial<{
+    /** Weight samples by tracking quality. Off restores the unweighted fit. */
+    qualityWeighting: boolean;
+    /** Lower bound on a sample's weight, so marginal is discounted, not deleted. */
+    weightFloor: number;
   }>;
   pxPerDegree?: number;
 }

@@ -26,5 +26,6 @@ supersedes the old one.
 | [0018](0018-diagnostics-and-validation.md)             | Diagnostics: signal quality vs. mapping error     | Accepted |
 | [0019](0019-lambda-by-held-out-target.md)              | Ridge λ by held-out target, not GCV               | Accepted |
 | [0020](0020-no-frame-preprocessing.md)                 | No super-resolution or denoising before detection | Accepted |
+| [0021](0021-quality-weighted-calibration-fit.md)       | Tracking quality weights the calibration fit      | Accepted |
 
 Template: [0000-template.md](0000-template.md)

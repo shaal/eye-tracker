@@ -353,7 +353,7 @@ impl Engine {
         // when you want to look at what was collected.
         self.last_scatter = collector.scatter();
         let model = collector
-            .finish(self.cfg.px_per_degree, display_fingerprint)
+            .finish_with(&self.cfg.calibration, self.cfg.px_per_degree, display_fingerprint)
             .map_err(EngineError::Calibration)?;
         self.model = Some(model.clone());
         self.filter.reset();
