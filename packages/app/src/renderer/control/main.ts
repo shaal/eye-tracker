@@ -21,7 +21,7 @@ import {
   type TuningPatch,
   type ValidationReport,
 } from '@eye-tracker/core';
-import { VisionLoop, listCameras } from './vision.js';
+import { VisionLoop, listCameras, type CameraLockStatus } from './vision.js';
 import { drawDebugOverlay } from './debug-draw.js';
 import { SLIDERS, buildSliders } from './tuning-ui.js';
 import { SignalStats } from './debug/signal-stats.js';
@@ -157,6 +157,31 @@ function clearBanner(id: string): void {
 // Vision loop
 // ---------------------------------------------------------------------------
 
+/**
+ * Report what the camera settled on, not what was asked of it.
+ *
+ * Both halves are things you act on. The format says whether you are getting
+ * the sensor's full resolution — iris localisation is sensor-limited, and the
+ * error budget in `debug/eye-zoom.ts` is quoted per camera pixel. The exposure
+ * mode says whether the auto-exposure lock took: a camera left on `continuous`
+ * keeps re-metering to whatever is on screen, and that shows up as jitter no
+ * amount of filter tuning will remove, because it is not zero-mean noise.
+ */
+function showCameraLock(c: CameraLockStatus): void {
+  text(
+    's-camera-format',
+    c.width > 0 ? `${c.width}×${c.height} @ ${c.frameRate.toFixed(0)} fps` : '—',
+  );
+  text(
+    's-exposure',
+    c.exposureMode === null
+      ? 'not reported by this camera'
+      : c.exposureMode === 'manual'
+        ? `locked${c.exposureTimeMs === null ? '' : ` · ${c.exposureTimeMs.toFixed(1)} ms`}`
+        : `${c.exposureMode} — this camera will not hold it`,
+  );
+}
+
 const vision = new VisionLoop(video, {
   onFrame(frame, features, inferenceMs, landmarks) {
     latestFeatures = features;
@@ -192,6 +217,7 @@ const vision = new VisionLoop(video, {
   onStatus(patch) {
     if (patch.delegate) currentDelegate = patch.delegate;
     if (patch.message) text('vision-message', patch.message);
+    if (patch.camera) showCameraLock(patch.camera);
     if (patch.delegate === 'CPU') {
       setBanner({
         id: 'cpu',
