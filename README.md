@@ -56,6 +56,28 @@ selects the word. Two singles only move the caret.
 and needs no pointer. Test it before you rely on gaze control. If the shortcut
 cannot be registered, the app refuses to enable control at all.
 
+## Your camera, your disk
+
+Camera frames are processed and forgotten. Landmarks never leave the renderer,
+sixteen numbers per frame cross to the main process, and nothing is written to
+disk. There is no network code in the runtime at all — the MediaPipe model and
+WASM are vendored at install time precisely so the app never needs one.
+
+The single exception is opt-in. **Record a training session** writes cropped
+images of your eyes to a folder on this machine, so a future gaze model can be
+trained on your face and your lighting
+([ADR-0022](docs/adrs/0022-local-session-recording.md)). It is off every time the
+app starts, there is no setting that turns it back on by itself, and while it
+runs there is a red banner in the window *and* a pulsing badge on the overlay
+that follows you across every display. Nothing is uploaded; there is no upload
+path in the codebase.
+
+```bash
+npm run recordings               # what is on disk: sessions, sizes, camera settings
+npm run recordings -- --json     # the same, for a training script
+npm run recordings -- --delete   # delete all of it, after confirming
+```
+
 ## How it works
 
 ```

@@ -23,6 +23,7 @@
     "start": "npm run dev",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test:native && npm run test:core",
+    "recordings": "node scripts/recordings.mjs",
     "smoke:mouse": "node scripts/smoke-mouse.mjs",
     "smoke:app": "npm run build && node scripts/smoke-app.mjs",
     "test:native": "cargo test --manifest-path packages/native/Cargo.toml -p eye-tracker-core",
