@@ -398,6 +398,54 @@ function drawProbe(s: OverlayState): void {
   ctx.restore();
 }
 
+/**
+ * The recording indicator (ADR-0022).
+ *
+ * Deliberately the only thing on this overlay that ignores `state.visible`, and
+ * deliberately drawn last so nothing — not the calibration blackout, not an
+ * instruction card — can cover it. The overlay is always-on-top, click-through
+ * and present on every Space, which makes it the one surface in the app that is
+ * guaranteed to be in front of the user while their face is being written to
+ * disk. A banner in a window they have minimised is not an indicator.
+ *
+ * It pulses because a static red dot in a corner is something the eye stops
+ * seeing within a minute, and this is exactly the fact that must not fade.
+ */
+function drawRecordingIndicator(): void {
+  if (!ctx) return;
+
+  const pad = 18;
+  const w = 108;
+  const h = 30;
+  const x = window.innerWidth - w - pad;
+  const y = pad;
+
+  // ~0.7 Hz, never fully off: dimming to invisible would create moments where
+  // the honest answer to "is it recording?" is not on screen.
+  const pulse = 0.62 + 0.38 * (0.5 + 0.5 * Math.sin(performance.now() / 700));
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(20, 4, 8, 0.82)';
+  ctx.strokeStyle = `rgba(255, 90, 90, ${pulse.toFixed(3)})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 15);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(x + 20, y + h / 2, 6, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(255, 70, 70, ${pulse.toFixed(3)})`;
+  ctx.fill();
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = '600 13px -apple-system, system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255, 235, 235, 0.95)';
+  ctx.fillText('RECORDING', x + 33, y + h / 2 + 1);
+  ctx.restore();
+}
+
 function render(): void {
   requestAnimationFrame(render);
   if (!ctx) return;
@@ -406,16 +454,19 @@ function render(): void {
 
   if (calibration?.active) {
     drawCalibration(calibration);
+    if (state?.recording) drawRecordingIndicator();
     return;
   }
   if (validation?.active) {
     drawValidation(validation);
+    if (state?.recording) drawRecordingIndicator();
     return;
   }
   // The probe sits under the crosshair: seeing both at once is the point —
   // the gap between them IS the reading.
   if (state) drawProbe(state);
   if (state?.visible) drawCrosshair(state);
+  if (state?.recording) drawRecordingIndicator();
 }
 
 render();

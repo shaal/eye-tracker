@@ -157,6 +157,48 @@
       </section>
 
       <!--
+        Session recording (ADR-0022). Off at every launch — there is no setting
+        that turns it back on by itself, and the copy below says plainly what
+        starting it does.
+      -->
+      <section class="panel">
+        <h2>Record a training session</h2>
+        <p class="hint">
+          Writes cropped images of <b>your eyes</b>, taken from the camera, to a
+          folder on this computer, together with the tracking numbers for each
+          frame. It exists so a future gaze model can be trained on your face,
+          your camera and your lighting.
+        </p>
+        <p class="hint">
+          <b>Nothing is uploaded.</b> There is no network code in the recording
+          path at all. The files stay on this machine until you delete them, and
+          the button below deletes all of them at once. Recording is off every
+          time the app starts and never turns itself on.
+        </p>
+        <div class="row">
+          <button id="rec-toggle" class="btn">Start recording</button>
+          <button id="rec-reveal" class="btn btn-ghost">Show folder</button>
+          <button id="rec-delete" class="btn btn-ghost">Delete all recordings</button>
+        </div>
+        <label class="field field-inline">
+          <span>Disk cap (GB)</span>
+          <input id="rec-cap" type="number" min="0.05" step="0.5" value="2.0" />
+        </label>
+        <dl class="stats">
+          <dt>Recording</dt><dd id="s-rec-state">off</dd>
+          <dt>On disk</dt><dd id="s-rec-size">—</dd>
+          <dt>Frames written</dt><dd id="s-rec-frames">—</dd>
+          <dt>Frames dropped</dt><dd id="s-rec-dropped">0</dd>
+        </dl>
+        <p class="hint" id="rec-message"></p>
+        <p class="hint">
+          Dropped frames are normal and harmless: the recorder always sacrifices
+          itself rather than the tracker. A large number just means fewer
+          training samples than the elapsed time suggests.
+        </p>
+      </section>
+
+      <!--
         Debug panel. Collapsed by default: these views answer "why is it
         inaccurate", which is not a question you have every session.
       -->

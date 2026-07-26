@@ -5,9 +5,12 @@ import type {
   CalibrationReport,
   CalibrationScatter,
   CalibrationUiState,
+  FrameRecord,
   GazeSensitivity,
   OverlayState,
   Point,
+  RecordedCamera,
+  RecordingStats,
   ScreenBounds,
   TuningPatch,
   ValidationReport,
@@ -84,6 +87,55 @@ const api = {
   setProbePoint: (at?: Point | null): Promise<Point | null> =>
     ipcRenderer.invoke('debug:setProbe', at),
 
+  // ---------------------------------------------------------------------
+  // Session recording (ADR-0022)
+  //
+  // Opt-in, off at every launch, and local-only. These five channels are the
+  // *entire* surface: a directory under `userData` is created, PNGs and a JSONL
+  // sidecar are written into it, the byte total is read back, and the whole lot
+  // can be deleted. There is deliberately no channel that takes a URL, a
+  // destination, or a remote handle of any kind — if this file grows one,
+  // something has gone badly wrong.
+  // ---------------------------------------------------------------------
+
+  startRecording: (request: {
+    camera: RecordedCamera | null;
+    video: { width: number; height: number };
+    intervalMs: number;
+    swapEyes: boolean;
+  }): Promise<{ sessionId: string; directory: string }> =>
+    ipcRenderer.invoke('recording:start', request),
+
+  stopRecording: (): Promise<RecordingStats> => ipcRenderer.invoke('recording:stop'),
+
+  /**
+   * One frame's pixels and metadata, one-way.
+   *
+   * Not an `invoke`, on purpose: the renderer must never end up awaiting main's
+   * disk, for exactly the reason `gaze:frame` is one-way (ADR-0009). The
+   * renderer supplies a sequence number and main derives the filenames, so a
+   * compromised camera-facing page cannot name a path.
+   */
+  recordFrame(payload: {
+    record: Omit<FrameRecord, 'eyeA' | 'eyeB'>;
+    eyeA: ArrayBuffer;
+    eyeB: ArrayBuffer;
+  }): void {
+    ipcRenderer.send('recording:frame', payload);
+  },
+
+  getRecordingStats: (): Promise<RecordingStats> => ipcRenderer.invoke('recording:stats'),
+
+  setRecordingCap: (bytes: number): Promise<RecordingStats> =>
+    ipcRenderer.invoke('recording:setCap', bytes),
+
+  /** Remove every recorded session on this machine. Not undoable. */
+  deleteAllRecordings: (): Promise<{ sessions: number; bytes: number }> =>
+    ipcRenderer.invoke('recording:deleteAll'),
+
+  /** Open the recordings folder, so the user can see exactly what is there. */
+  revealRecordings: (): Promise<void> => ipcRenderer.invoke('recording:reveal'),
+
   // --- subscriptions ---
   onStatus(cb: (s: AppStatus) => void): () => void {
     const h = (_e: unknown, s: AppStatus) => cb(s);
@@ -104,6 +156,18 @@ const api = {
     const h = (_e: unknown, s: ValidationUiState) => cb(s);
     ipcRenderer.on('validation:ui', h);
     return () => ipcRenderer.removeListener('validation:ui', h);
+  },
+  /**
+   * Recording state pushed by main.
+   *
+   * Needed because main can end a session on its own when the disk cap is
+   * reached, and a UI still claiming to record would be worse than no UI at
+   * all.
+   */
+  onRecordingState(cb: (s: RecordingStats) => void): () => void {
+    const h = (_e: unknown, s: RecordingStats) => cb(s);
+    ipcRenderer.on('recording:state', h);
+    return () => ipcRenderer.removeListener('recording:state', h);
   },
   onNotice(cb: (n: { level: string; message: string }) => void): () => void {
     const h = (_e: unknown, n: { level: string; message: string }) => cb(n);

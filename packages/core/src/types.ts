@@ -296,6 +296,17 @@ export interface OverlayState {
   probeVisible: boolean;
   probeX: number;
   probeY: number;
+  /**
+   * A session recording is writing images of the user's face to disk
+   * (ADR-0022).
+   *
+   * On the overlay rather than only in the control window because the overlay
+   * is always-on-top, spans every display, and is visible when the control
+   * window is minimised or behind something. "Am I being recorded?" must be
+   * answerable without going to look for the answer, so this draws even when
+   * `visible` is false — the crosshair is a preference, this is not.
+   */
+  recording: boolean;
 }
 
 export interface CalibrationUiState {
