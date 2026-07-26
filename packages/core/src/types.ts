@@ -277,6 +277,40 @@ export interface TuningPatch {
   pxPerDegree?: number;
 }
 
+/**
+ * Every grouped key of `TuningPatch`, so the main process can forward a patch
+ * to the engine without naming the groups a second time.
+ *
+ * The duplication this replaces was not hypothetical. `calibration` was added
+ * for ADR-0021 and the hand-written forwarding list in `engine-bridge.ts` was
+ * not updated, so `qualityWeighting` and `weightFloor` were settable in the
+ * type, storable in settings, and silently dropped on the way to the engine —
+ * the A/B switch ADR-0021 promised never reached Rust at all. Nothing failed;
+ * the knob simply did nothing, which is the hardest kind of bug to notice.
+ */
+export const TUNING_GROUPS = ['filter', 'blink', 'guard', 'takeover', 'calibration'] as const;
+
+export type TuningGroup = (typeof TUNING_GROUPS)[number];
+
+/** The keys of `T` whose values are objects — i.e. the grouped knobs. */
+type ObjectGroupsOf<T> = {
+  [K in keyof T]-?: NonNullable<T[K]> extends object ? K : never;
+}[keyof T];
+
+type AssertNever<T extends never> = T;
+
+/**
+ * Compile-time exhaustiveness check, and the point of the whole exercise.
+ *
+ * If a new group is added to `TuningPatch` without being added to
+ * `TUNING_GROUPS`, `Exclude` resolves to that key rather than `never` and this
+ * line fails to typecheck. CI runs `npm run typecheck`, so the next occurrence
+ * of this bug is a build failure rather than a knob that quietly does nothing.
+ */
+export type _AllTuningGroupsListed = AssertNever<
+  Exclude<ObjectGroupsOf<TuningPatch>, TuningGroup>
+>;
+
 /** Overlay draw state, sent at full frame rate. */
 export interface OverlayState {
   visible: boolean;

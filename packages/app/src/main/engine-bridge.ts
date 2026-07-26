@@ -12,6 +12,7 @@ import {
   headMotionTargets,
   summarizeValidation,
   validationTargets,
+  TUNING_GROUPS,
   type CalibrationInstruction,
   type CalibrationProfile,
   type CalibrationReport,
@@ -737,13 +738,23 @@ export class EngineBridge {
   }
 }
 
-/** Map the camelCase UI patch onto the native config shape. */
+/**
+ * Map the camelCase UI patch onto the native config shape.
+ *
+ * Driven by `TUNING_GROUPS` rather than a hand-written list of `if`s. The list
+ * form silently dropped `calibration` when ADR-0021 added it, and a dropped
+ * group is invisible: the patch is well-formed, the IPC call succeeds, the
+ * setting persists, and only the engine never hears about it. Iterating a
+ * checked constant makes forgetting a group a typecheck failure instead.
+ *
+ * `pxPerDegree` stays separate because it is a scalar, not a group.
+ */
 function toNativePatch(t: TuningPatch): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  if (t.filter) out['filter'] = t.filter;
-  if (t.blink) out['blink'] = t.blink;
-  if (t.guard) out['guard'] = t.guard;
-  if (t.takeover) out['takeover'] = t.takeover;
+  for (const group of TUNING_GROUPS) {
+    const value = t[group];
+    if (value) out[group] = value;
+  }
   if (t.pxPerDegree !== undefined) out['pxPerDegree'] = t.pxPerDegree;
   return out;
 }
