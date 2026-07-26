@@ -61,6 +61,12 @@ face landmarker graph starts with the GPU delegate.
 5. **Overlay behaviour** over full-screen apps and across Spaces.
 6. **The kill switch under duress** — ⌥⌘E while the cursor misbehaves.
 7. **Calibration accuracy in degrees** on a real face.
+8. **Whether the camera honours the exposure lock** (ADR-0020 argument 5, #27).
+   Read "Camera format" and "Exposure" in the Status panel: anything other than
+   `locked` means the sensor is still re-metering to whatever is on screen, and
+   that jitter is correlated with screen content rather than zero-mean, so no
+   filter setting removes it. The same rows answer #42 — if the negotiated
+   format traded frame rate away for resolution, it shows up here first.
 
 ## Known gaps
 
@@ -68,8 +74,13 @@ face landmarker graph starts with the GPU delegate.
   path to disable control. The global shortcut (pointer-free) and the in-app
   toggle both exist, so this is redundancy rather than a missing safety
   property — but the ADR is ahead of the code.
-- **No TypeScript tests.** The Rust core has 135; the TS side has none. Feature
-  extraction (ADR-0005) is pure and eminently testable.
+- **Thin TypeScript test coverage.** The Rust core has 150; the TS side has 38,
+  covering the recording queue and eye-crop geometry. Feature extraction
+  (ADR-0005) is pure and eminently testable, and still untested.
+- **Session recording has never been run with a camera.** The capture path
+  (ADR-0022) type-checks and its pure pieces are tested, but no frame has been
+  captured, encoded or written by it on real hardware, and the claim that it
+  costs the vision loop nothing is a design argument rather than a measurement.
 - **`electron-builder` config absent** — no signed/notarized build, no
   `NSCameraUsageDescription`.
 - **Windows/Linux mouse backend unverified**, and double-click there is emulated
