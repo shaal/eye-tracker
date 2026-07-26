@@ -90,7 +90,7 @@ Three decisions carry most of the weight:
 ## Layout
 
 ```
-docs/adrs/        12 architecture decision records — the "why"
+docs/adrs/        20 architecture decision records — the "why"
 docs/plan/        milestones, risk register, tuning playbook, status
 packages/native/  Rust: eye-tracker-core (pure, tested) + napi bindings
 packages/core/    Shared TS: landmark constants, feature extraction, frame layout
