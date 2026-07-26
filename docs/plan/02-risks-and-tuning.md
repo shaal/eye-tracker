@@ -48,7 +48,12 @@ have:
 
 - **Spread is large (> ~25 px):** this is a *tracking* problem. No filter
   setting fixes it. Improve lighting, sit closer, or switch to a better camera
-  (the camera picker accepts a phone exposed as a virtual webcam).
+  (the camera picker accepts a phone exposed as a virtual webcam). Read
+  "Exposure" in the HUD while you are there: anything other than `locked` means
+  the camera is still re-metering the scene, and since the brightest thing on
+  your face is the screen, every change of screen content moves the iris
+  estimate. That motion is correlated with what you are doing, so no filter can
+  tell it apart from gaze.
 - **Spread is small but the cursor still moves:** this is a *filter* problem,
   so:
   1. Lower `min_cutoff` (0.6 → 0.4 Hz). More smoothing at rest.
