@@ -234,11 +234,46 @@ pub struct CalibrationConfig {
     /// user who has loosened `min_quality`, which is exactly when an unbounded
     /// discount would be dangerous.
     pub weight_floor: f64,
+
+    // --- vertical feature semantics (ADR-0025) ---
+    /// Measure vertical gaze against the eyelid aperture centre instead of the
+    /// eye-corner midpoint.
+    ///
+    /// The corner midpoint is anchored to the socket and does not move when the
+    /// lid drops, so lid-driven displacement of the iris estimate enters `gy`
+    /// at full strength. The aperture centre moves with the lid, so it cancels.
+    /// Measured on real hardware (#57): the corner basis produced 24 px of
+    /// predicted vertical range for 851 px of target range.
+    ///
+    /// Off restores ADR-0005's original vertical reference exactly. Both are
+    /// packed into every frame, so this switch is a refit, not a rebuild.
+    pub aperture_vertical: bool,
+    /// Add the openness pair `o` and `gy·o` to the feature expansion.
+    ///
+    /// Two columns, and no more: the effective sample size is ~9 targets, not
+    /// the ~180 frames they were collected over, and the design matrix is
+    /// already 18 wide. Default off for that reason — this is the hypothesis
+    /// test of #59 stage 1, and it spends capacity that `aperture_vertical`
+    /// does not.
+    pub openness_terms: bool,
+    /// Fit the vertical axis on a reduced column set, dropping the columns that
+    /// carry horizontal information (`gx`, `roll`, `gx·yaw`, `dgx`).
+    ///
+    /// Default off: it is a capacity bet, not a geometric correction, and it has
+    /// not been measured on hardware. The switch exists so that the sessions
+    /// recorded for #2 can answer it without another code change.
+    pub axis_specific_vertical: bool,
 }
 
 impl Default for CalibrationConfig {
     fn default() -> Self {
-        Self { quality_weighting: true, weight_floor: 0.25 }
+        Self {
+            quality_weighting: true,
+            weight_floor: 0.25,
+            aperture_vertical: true,
+            openness_terms: false,
+            axis_specific_vertical: false,
+        }
     }
 }
 

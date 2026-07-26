@@ -334,7 +334,18 @@ const vision = new VisionLoop(video, {
     // Feed the noise-floor estimate only when there is a real measurement to
     // feed it. Zeros from a lost face would read as a perfectly quiet signal
     // and make the tracker look far better than it is.
-    if (features.ok) signalStats.push(features.gx, features.gy, features.dgx);
+    //
+    // The vertical value has to be the one the fit consumes (ADR-0025). "Is
+    // there a usable signal at all?" is the first question the tuning playbook
+    // sends people to, and answering it about a feature the model never sees
+    // would be worse than not answering it.
+    if (features.ok) {
+      signalStats.push(
+        features.gx,
+        apertureVertical ? features.gyAperture : features.gy,
+        features.dgx,
+      );
+    }
 
     const now = performance.now();
     if (lastFrameAt > 0) {
@@ -787,6 +798,14 @@ window.eyeTracker.onCalibrationUi(async (c) => {
 // --- behaviour toggles ---
 const optTakeover = $<HTMLInputElement>('opt-takeover');
 const optConfidenceTrust = $<HTMLInputElement>('opt-confidence-trust');
+const optApertureVertical = $<HTMLInputElement>('opt-aperture-vertical');
+/**
+ * Mirrors the engine's `apertureVertical`, so the signal diagnostic measures the
+ * same vertical feature the fit does (ADR-0025). Set from the resolved engine
+ * config, never guessed.
+ */
+let apertureVertical = true;
+const optOpennessTerms = $<HTMLInputElement>('opt-openness-terms');
 const optShowRaw = $<HTMLInputElement>('opt-show-raw');
 const optOverlay = $<HTMLInputElement>('opt-overlay');
 
@@ -797,6 +816,21 @@ optTakeover.addEventListener('change', () => {
 // so a suspected regression can be attributed without a rebuild (ADR-0004).
 optConfidenceTrust.addEventListener('change', () => {
   void window.eyeTracker.setTuning({ filter: { confidenceTrust: optConfidenceTrust.checked } });
+});
+// The two A/B switches for ADR-0025. Both change what the calibration fit is
+// fitted *on*, so neither does anything to the model already loaded — the label
+// says so rather than leaving the user to wonder why nothing moved.
+optApertureVertical.addEventListener('change', () => {
+  apertureVertical = optApertureVertical.checked;
+  // The noise floor and travel are measured over a rolling window, so keeping
+  // the old samples would mix two different features into one statistic.
+  signalStats.reset();
+  void window.eyeTracker.setTuning({
+    calibration: { apertureVertical: optApertureVertical.checked },
+  });
+});
+optOpennessTerms.addEventListener('change', () => {
+  void window.eyeTracker.setTuning({ calibration: { opennessTerms: optOpennessTerms.checked } });
 });
 optShowRaw.addEventListener('change', () => {
   void window.eyeTracker.setSettings({ showRawGaze: optShowRaw.checked });
@@ -1312,6 +1346,9 @@ void (async () => {
   applyMode(((tuning['mode'] as string) ?? 'blink') as ClickMode);
   optTakeover.checked = (tuning['takeoverEnabled'] as boolean) ?? true;
   optConfidenceTrust.checked = (tuning['confidenceTrust'] as boolean) ?? true;
+  optApertureVertical.checked = (tuning['apertureVertical'] as boolean) ?? true;
+  apertureVertical = optApertureVertical.checked;
+  optOpennessTerms.checked = (tuning['opennessTerms'] as boolean) ?? false;
 
   await startVision(settings.cameraDeviceId ?? '', settings.swapEyes ?? false);
 })();

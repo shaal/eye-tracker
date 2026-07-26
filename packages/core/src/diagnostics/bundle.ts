@@ -176,6 +176,10 @@ export const AB_SWITCH_KEYS = [
   /** ADR-0023 — let per-frame confidence modulate the filter. */
   'confidenceTrust',
   'trustFloor',
+  /** ADR-0025 — where vertical gaze is measured from, and what modulates it. */
+  'apertureVertical',
+  'opennessTerms',
+  'axisSpecificVertical',
   /** ADR-0014 — the spread-adaptive fixation clamp. */
   'adaptiveClamp',
   'clampNoiseScale',
@@ -270,6 +274,20 @@ export interface DiagnosticsCalibration {
   meanWeight: number | null;
   minWeight: number | null;
   effectiveSamples: number | null;
+  /** Which reference `gy` was measured against (ADR-0025). */
+  verticalBasis: string | null;
+  opennessTerms: boolean | null;
+  axisSpecific: boolean | null;
+  openRef: number | null;
+  /**
+   * Predicted vertical spread over the calibration targets, as a fraction of
+   * the targets' own — the number #57 asked to be reported.
+   *
+   * It answers a question mean error cannot: whether the vertical channel is
+   * merely inaccurate or has collapsed to a constant. 0.03 means the model
+   * returns the same y wherever the user looks.
+   */
+  verticalRangeFraction: number | null;
 }
 
 export interface DiagnosticsBundle {
@@ -636,6 +654,14 @@ function buildCalibration(c: CalibrationReport): DiagnosticsCalibration {
     meanWeight: num(c.meanWeight, 4),
     minWeight: num(c.minWeight, 4),
     effectiveSamples: num(c.effectiveSamples, 1),
+    // `null` again for a profile from before ADR-0025: it was fitted on the
+    // corner basis, but it did not record the fact and inventing the record
+    // would make a diff between two bundles say something that was not measured.
+    verticalBasis: c.verticalBasis ?? null,
+    opennessTerms: c.opennessTerms ?? null,
+    axisSpecific: c.axisSpecific ?? null,
+    openRef: num(c.openRef, 4),
+    verticalRangeFraction: num(c.verticalRangeFraction, 3),
   };
 }
 
@@ -854,6 +880,15 @@ export function formatBundleSummary(bundle: DiagnosticsBundle, filePath?: string
     lines.push(
       `  λ ${n(k.lambdaX, 4)} / ${n(k.lambdaY, 4)} · ` +
         (k.crossValidated ? 'cross-validated' : 'NOT cross-validated — optimistic'),
+    );
+    // Printed unconditionally, and directly under the error line, because a
+    // collapsed vertical channel is invisible in mean error and is the single
+    // most useful thing to look at first (#57).
+    lines.push(
+      `  vertical: ${k.verticalBasis ?? 'not recorded'} basis, ` +
+        `range ${n(k.verticalRangeFraction, 2)} of target span` +
+        (k.opennessTerms ? ` · openness terms on (ref ${n(k.openRef, 3)})` : '') +
+        (k.axisSpecific ? ' · reduced vertical column set' : ''),
     );
     if (k.qualityWeighted) {
       lines.push(

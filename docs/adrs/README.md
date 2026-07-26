@@ -30,5 +30,6 @@ supersedes the old one.
 | [0022](0022-local-session-recording.md)                | Opt-in, local-only recording of eye crops         | Accepted |
 | [0023](0023-confidence-modulated-filter-trust.md)      | Tracking confidence modulates the filter          | Accepted |
 | [0024](0024-shareable-diagnostics-bundle.md)           | A diagnostics bundle designed to be shared        | Accepted |
+| [0025](0025-aperture-relative-vertical-gaze.md)        | Vertical gaze measured against the lid aperture   | Accepted |
 
 Template: [0000-template.md](0000-template.md)

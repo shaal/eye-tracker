@@ -21,6 +21,7 @@ function eye(width: number, cx = 0.5, cy = 0.5): EyeMeasure {
   return {
     gx: 0,
     gy: 0,
+    gyAperture: 0,
     width,
     centerX: cx,
     centerY: cy,

@@ -41,7 +41,10 @@
 //!   checks (`MIN_SAMPLES`) and for anything the user reads as "how many frames
 //!   did you collect".
 
-use super::model::{expand, CalibrationModel, CalibrationReport, FeatureTier, MAX_FEATURES};
+use super::model::{
+    active_columns, expand, CalibrationModel, CalibrationReport, Expansion, FeatureTier,
+    VerticalBasis, MAX_FEATURES,
+};
 use crate::config::CalibrationConfig;
 use crate::frame::GazeFrame;
 use crate::math::linalg::{invert_spd, solve_spd, trace_of_product};
@@ -133,11 +136,58 @@ fn kish_n_eff(w: &[f64]) -> f64 {
     sum * sum / sum_sq
 }
 
-/// One axis' fitted coefficients.
+/// One axis' fitted coefficients. `beta` is always full length, with exact
+/// zeros in any column the axis was not fitted on (ADR-0025).
 struct AxisFit {
     beta: Vec<f64>,
     intercept: f64,
     lambda: f64,
+}
+
+/// The openness normalizer for a calibration set: a high percentile of the
+/// worse eye's aspect ratio.
+///
+/// A percentile rather than the maximum because the eye-aspect ratio is built
+/// from landmark positions and picks up isolated spikes; the single widest frame
+/// of ~180 is as likely to be a tracking artefact as a genuinely wide-open eye.
+/// The 90th is high enough to mean "open" and leaves 18 frames above it to
+/// absorb the artefacts.
+///
+/// Returns `None` when there is nothing to measure, which the caller reads as
+/// "no openness terms" rather than substituting a guess.
+fn openness_reference(samples: &[CalibSample]) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut worst: Vec<f64> = samples
+        .iter()
+        .map(|s| s.frame.open_left.min(s.frame.open_right))
+        .filter(|v| v.is_finite())
+        .collect();
+    if worst.is_empty() {
+        return None;
+    }
+    worst.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    let idx = (((worst.len() - 1) as f64) * 0.90).round() as usize;
+    Some(worst[idx.min(worst.len() - 1)])
+}
+
+/// Build the expansion a fit will use, from the config and the data.
+fn expansion_for(
+    samples: &[CalibSample],
+    tier: FeatureTier,
+    cfg: &CalibrationConfig,
+) -> Expansion {
+    let basis = if cfg.aperture_vertical { VerticalBasis::Aperture } else { VerticalBasis::Corner };
+    // Computed once over the whole calibration set and then reused by every
+    // cross-validation fold, exactly as λ is: a fold that re-derived its own
+    // normalizer would be measuring a different model from the one shipped.
+    let open_ref = if cfg.openness_terms && tier == FeatureTier::Full {
+        openness_reference(samples)
+    } else {
+        None
+    };
+    Expansion { tier, basis, open_ref }
 }
 
 /// Expand every sample and standardize the resulting design matrix.
@@ -153,15 +203,15 @@ struct AxisFit {
 /// exactly 1, hence `diag(G) = Σw`, which is the invariant the λ grid rides on.
 fn build_design(
     samples: &[CalibSample],
-    tier: FeatureTier,
+    exp: &Expansion,
     w: &[f64],
     w_sum: f64,
 ) -> (Vec<f64>, Standardizer, usize) {
-    let p = tier.len();
+    let p = exp.len();
     let n = samples.len();
     let mut rows = vec![0.0; n * p];
     for (i, s) in samples.iter().enumerate() {
-        let (phi, len) = expand(&s.frame, tier);
+        let (phi, len) = expand(&s.frame, exp);
         debug_assert_eq!(len, p);
         rows[i * p..i * p + p].copy_from_slice(&phi[..p]);
     }
@@ -222,11 +272,11 @@ struct Normal {
     p: usize,
 }
 
-fn normal_equations(samples: &[CalibSample], tier: FeatureTier, w: &[f64]) -> Normal {
+fn normal_equations(samples: &[CalibSample], exp: &Expansion, w: &[f64]) -> Normal {
     let n = samples.len();
     debug_assert_eq!(w.len(), n);
     let w_sum: f64 = w.iter().sum();
-    let (rows, std, p) = build_design(samples, tier, w, w_sum);
+    let (rows, std, p) = build_design(samples, exp, w, w_sum);
 
     // Weighted target means. This is the intercept, and it has to be the centre
     // of the *weighted* fit: an unweighted mean would pull the model's origin
@@ -267,13 +317,74 @@ fn normal_equations(samples: &[CalibSample], tier: FeatureTier, w: &[f64]) -> No
     Normal { std, g, cx, cy, yy_x, yy_y, mx, my, w_sum, p }
 }
 
-/// Solve (G + λI)β = c.
+/// One axis' normal equations, restricted to the columns that axis is fitted on.
+///
+/// ## Why an axis gets its own subsystem
+///
+/// Both axes share one design matrix, one standardizer and one Gram matrix —
+/// that part is unchanged, and it is what keeps the λ scan cheap. What
+/// ADR-0025 adds is that the *vertical* axis may be solved over a subset of the
+/// columns, because four of the eighteen carry horizontal information that has
+/// nothing to say about screen y.
+///
+/// Gathering a submatrix once and scanning λ over it, rather than masking
+/// inside the λ loop, keeps the full-column case a literal copy: `gather` with
+/// `active = 0..p` hands `solve_spd` byte-identical input to what it received
+/// before, so "axis-specific off" is bit-for-bit the previous fit rather than
+/// merely close to it.
+struct AxisSystem {
+    /// Gram block over the active columns, `k×k`.
+    g: Vec<f64>,
+    /// Cross-products over the active columns.
+    c: Vec<f64>,
+    k: usize,
+    /// Active column indices in the full design, ascending. Length `k`.
+    active: Vec<usize>,
+    /// Weighted total sum of squares for this axis' centred target.
+    yy: f64,
+    intercept: f64,
+}
+
+fn axis_system(eq: &Normal, c_full: &[f64], yy: f64, intercept: f64, active: &[usize]) -> AxisSystem {
+    let p = eq.p;
+    let k = active.len();
+    let mut g = vec![0.0; k * k];
+    let mut c = vec![0.0; k];
+    for (a, &ja) in active.iter().enumerate() {
+        c[a] = c_full[ja];
+        for (b, &jb) in active.iter().enumerate() {
+            g[a * k + b] = eq.g[ja * p + jb];
+        }
+    }
+    AxisSystem { g, c, k, active: active.to_vec(), yy, intercept }
+}
+
+/// Scatter a solution over the active columns back into a full-length β, with
+/// exact zeros elsewhere.
+///
+/// Exact zeros are what let `predict` stay oblivious to all of this: a dropped
+/// column still gets standardized and still gets multiplied, by 0.0.
+fn scatter(sub: &[f64], active: &[usize], p: usize) -> Vec<f64> {
+    let mut beta = vec![0.0; p];
+    for (a, &j) in active.iter().enumerate() {
+        beta[j] = sub[a];
+    }
+    beta
+}
+
+/// Solve (G + λI)β = c over the active columns.
 fn ridge_solve(g: &[f64], c: &[f64], p: usize, lambda: f64) -> Option<Vec<f64>> {
     let mut a = g.to_vec();
     for i in 0..p {
         a[i * p + i] += lambda;
     }
     solve_spd(&a, p, c).ok()
+}
+
+/// Solve one axis' subsystem and return a full-length coefficient vector.
+fn solve_axis(sys: &AxisSystem, p: usize, lambda: f64) -> Option<Vec<f64>> {
+    let sub = ridge_solve(&sys.g, &sys.c, sys.k, lambda)?;
+    Some(scatter(&sub, &sys.active, p))
 }
 
 /// How λ is chosen for a fit.
@@ -289,38 +400,37 @@ enum LambdaChoice {
 
 /// Fit one axis by scanning the λ grid and scoring with GCV.
 fn fit_axis_gcv(
-    g: &[f64],
-    c: &[f64],
-    yy: f64,
+    sys: &AxisSystem,
+    p: usize,
     w_sum: f64,
     n_eff: f64,
-    p: usize,
-    intercept: f64,
 ) -> Result<AxisFit, CalibrationError> {
+    let (g, c, k) = (&sys.g, &sys.c, sys.k);
+    let (yy, intercept) = (sys.yy, sys.intercept);
     let mut best: Option<(f64, f64, Vec<f64>)> = None; // (gcv, lambda, beta)
 
     for &ratio in &lambda_ratios() {
         let lambda = ratio * w_sum;
-        let Some(beta) = ridge_solve(g, c, p, lambda) else { continue };
+        let Some(beta) = ridge_solve(g, c, k, lambda) else { continue };
         let mut a = g.to_vec();
-        for i in 0..p {
-            a[i * p + i] += lambda;
+        for i in 0..k {
+            a[i * k + i] += lambda;
         }
-        let Ok(a_inv) = invert_spd(&a, p) else { continue };
+        let Ok(a_inv) = invert_spd(&a, k) else { continue };
 
         // RSS = yy - 2βᵀc + βᵀGβ
         let bc: f64 = beta.iter().zip(c).map(|(b, ci)| b * ci).sum();
         let mut bgb = 0.0;
-        for i in 0..p {
+        for i in 0..k {
             let mut row = 0.0;
-            for j in 0..p {
-                row += g[i * p + j] * beta[j];
+            for j in 0..k {
+                row += g[i * k + j] * beta[j];
             }
             bgb += beta[i] * row;
         }
         let rss = (yy - 2.0 * bc + bgb).max(0.0);
 
-        let dof = trace_of_product(&a_inv, g, p);
+        let dof = trace_of_product(&a_inv, g, k);
         // Scored against the *effective* sample count. Using the raw sample
         // count here is what made GCV under-regularize so badly: it treats 20
         // samples from one fixation as 20 independent observations, so the
@@ -343,14 +453,15 @@ fn fit_axis_gcv(
     }
 
     let (_, lambda, beta) = best.ok_or(CalibrationError::Degenerate)?;
-    Ok(AxisFit { beta, intercept, lambda })
+    Ok(AxisFit { beta: scatter(&beta, &sys.active, p), intercept, lambda })
 }
 
 /// Fit both axes from a set of samples. Shared by the main fit and by each
 /// leave-one-target-out fold.
 fn fit_coefficients(
     samples: &[CalibSample],
-    tier: FeatureTier,
+    exp: &Expansion,
+    plan: &AxisPlan,
     choice: &LambdaChoice,
     cfg: &CalibrationConfig,
 ) -> Result<(Standardizer, AxisFit, AxisFit), CalibrationError> {
@@ -361,18 +472,19 @@ fn fit_coefficients(
     if n < MIN_SAMPLES {
         return Err(CalibrationError::NotEnoughSamples { got: n, need: MIN_SAMPLES });
     }
-    let eq = normal_equations(samples, tier, &sample_weights(samples, cfg));
+    let eq = normal_equations(samples, exp, &sample_weights(samples, cfg));
+    let (sx, sy) = plan.systems(&eq);
 
     let (fx, fy) = match *choice {
         LambdaChoice::Gcv { n_eff } => (
-            fit_axis_gcv(&eq.g, &eq.cx, eq.yy_x, eq.w_sum, n_eff, eq.p, eq.mx)?,
-            fit_axis_gcv(&eq.g, &eq.cy, eq.yy_y, eq.w_sum, n_eff, eq.p, eq.my)?,
+            fit_axis_gcv(&sx, eq.p, eq.w_sum, n_eff)?,
+            fit_axis_gcv(&sy, eq.p, eq.w_sum, n_eff)?,
         ),
         LambdaChoice::Fixed { x, y } => {
             let lx = x * eq.w_sum;
             let ly = y * eq.w_sum;
-            let bx = ridge_solve(&eq.g, &eq.cx, eq.p, lx).ok_or(CalibrationError::Degenerate)?;
-            let by = ridge_solve(&eq.g, &eq.cy, eq.p, ly).ok_or(CalibrationError::Degenerate)?;
+            let bx = solve_axis(&sx, eq.p, lx).ok_or(CalibrationError::Degenerate)?;
+            let by = solve_axis(&sy, eq.p, ly).ok_or(CalibrationError::Degenerate)?;
             (
                 AxisFit { beta: bx, intercept: eq.mx, lambda: lx },
                 AxisFit { beta: by, intercept: eq.my, lambda: ly },
@@ -381,6 +493,33 @@ fn fit_coefficients(
     };
 
     Ok((eq.std, fx, fy))
+}
+
+/// Which columns each axis is fitted on (ADR-0025).
+///
+/// The horizontal axis always gets every column; only the vertical one can be
+/// reduced, because the asymmetry is physical — under a camera above the screen
+/// the two axes have genuinely different failure modes, and a shared expansion
+/// is convenience rather than principle.
+struct AxisPlan {
+    x: Vec<usize>,
+    y: Vec<usize>,
+}
+
+impl AxisPlan {
+    fn new(exp: &Expansion, cfg: &CalibrationConfig) -> Self {
+        Self {
+            x: active_columns(exp, false),
+            y: active_columns(exp, cfg.axis_specific_vertical),
+        }
+    }
+
+    fn systems(&self, eq: &Normal) -> (AxisSystem, AxisSystem) {
+        (
+            axis_system(eq, &eq.cx, eq.yy_x, eq.mx, &self.x),
+            axis_system(eq, &eq.cy, eq.yy_y, eq.my, &self.y),
+        )
+    }
 }
 
 /// Choose λ by leave-one-*target*-out cross-validation.
@@ -407,7 +546,8 @@ fn fit_coefficients(
 /// Returns `None` when there are too few targets to hold one out.
 fn select_lambda_by_target(
     samples: &[CalibSample],
-    tier: FeatureTier,
+    exp: &Expansion,
+    plan: &AxisPlan,
     target_ids: &[usize],
     cfg: &CalibrationConfig,
 ) -> Option<(f64, f64)> {
@@ -421,6 +561,8 @@ fn select_lambda_by_target(
     // per fold rather than once per (fold, λ) pair.
     struct Fold {
         eq: Normal,
+        sx: AxisSystem,
+        sy: AxisSystem,
         test: Vec<CalibSample>,
         /// Weights of the held-out samples, so the score is the same risk the
         /// fit minimizes.
@@ -438,7 +580,9 @@ fn select_lambda_by_target(
         }
         let w = sample_weights(&train, cfg);
         let test_w = sample_weights(&test, cfg);
-        folds.push(Fold { eq: normal_equations(&train, tier, &w), test, test_w });
+        let eq = normal_equations(&train, exp, &w);
+        let (sx, sy) = plan.systems(&eq);
+        folds.push(Fold { eq, sx, sy, test, test_w });
     }
     if folds.len() < 2 {
         return None;
@@ -460,8 +604,8 @@ fn select_lambda_by_target(
         for fold in &folds {
             let lambda = ratio * fold.eq.w_sum;
             let (Some(bx), Some(by)) = (
-                ridge_solve(&fold.eq.g, &fold.eq.cx, fold.eq.p, lambda),
-                ridge_solve(&fold.eq.g, &fold.eq.cy, fold.eq.p, lambda),
+                solve_axis(&fold.sx, fold.eq.p, lambda),
+                solve_axis(&fold.sy, fold.eq.p, lambda),
             ) else {
                 ok = false;
                 break;
@@ -477,7 +621,7 @@ fn select_lambda_by_target(
             // figure below is a different question — "how far off will this be
             // in practice" — and counts every held-out frame equally.
             for (s, &w) in fold.test.iter().zip(&fold.test_w) {
-                let p = predict_with(&fold.eq.std, &fx, &fy, tier, &s.frame);
+                let p = predict_with(&fold.eq.std, &fx, &fy, exp, &s.frame);
                 sse_x += w * (p.x - s.target.x).powi(2);
                 sse_y += w * (p.y - s.target.y).powi(2);
             }
@@ -530,10 +674,10 @@ fn predict_with(
     std: &Standardizer,
     fx: &AxisFit,
     fy: &AxisFit,
-    tier: FeatureTier,
+    exp: &Expansion,
     frame: &GazeFrame,
 ) -> Vec2 {
-    let (phi, p) = expand(frame, tier);
+    let (phi, p) = expand(frame, exp);
     let mut x = fx.intercept;
     let mut y = fy.intercept;
     for (j, &v) in phi.iter().take(p.min(MAX_FEATURES)).enumerate() {
@@ -542,6 +686,57 @@ fn predict_with(
         y += fy.beta[j] * z;
     }
     Vec2::new(x, y)
+}
+
+/// How much of the targets' vertical spread the model's predictions reproduce.
+///
+/// **This is the diagnostic #57 asked for, and it is more informative than mean
+/// error.** Collapse and bias produce similar mean errors but completely
+/// different signatures: `ŷ = y + c` still spans the screen, whereas `ŷ ≈ c`
+/// spans nothing. The session that motivated ADR-0025 returned 0.03 — 24 px of
+/// predicted range for 851 px of target range — and mean error alone could not
+/// distinguish that from an ordinary poor fit.
+///
+/// Measured per *target*, using each target's mean prediction, so that
+/// within-fixation jitter cannot masquerade as range. Returns NaN when the
+/// targets themselves have no vertical spread, which is the honest answer:
+/// there was nothing to reproduce.
+fn vertical_range_fraction(
+    samples: &[CalibSample],
+    std: &Standardizer,
+    fx: &AxisFit,
+    fy: &AxisFit,
+    exp: &Expansion,
+) -> f64 {
+    let mut ids: Vec<usize> = samples.iter().map(|s| s.target_index).collect();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let (mut lo_pred, mut hi_pred) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut lo_target, mut hi_target) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &id in &ids {
+        let (mut sum, mut count) = (0.0, 0usize);
+        let mut target_y = f64::NAN;
+        for s in samples.iter().filter(|s| s.target_index == id) {
+            sum += predict_with(std, fx, fy, exp, &s.frame).y;
+            count += 1;
+            target_y = s.target.y;
+        }
+        if count == 0 {
+            continue;
+        }
+        let mean = sum / count as f64;
+        lo_pred = lo_pred.min(mean);
+        hi_pred = hi_pred.max(mean);
+        lo_target = lo_target.min(target_y);
+        hi_target = hi_target.max(target_y);
+    }
+
+    let span = hi_target - lo_target;
+    if !span.is_finite() || span <= 0.0 {
+        return f64::NAN;
+    }
+    (hi_pred - lo_pred) / span
 }
 
 /// Fit a calibration model with the default calibration config.
@@ -575,6 +770,8 @@ pub fn fit_with(
     }
 
     let tier = FeatureTier::select(n_targets, samples.len());
+    let exp = expansion_for(samples, tier, cfg);
+    let plan = AxisPlan::new(&exp, cfg);
     let weights = sample_weights(samples, cfg);
 
     // Prefer held-out-target CV for λ. GCV is the fallback for runs with too
@@ -582,12 +779,12 @@ pub fn fit_with(
     // target count rather than the sample count — samples from one fixation are
     // not independent observations, and pretending otherwise is what let the
     // model overfit catastrophically.
-    let choice = match select_lambda_by_target(samples, tier, &target_ids, cfg) {
+    let choice = match select_lambda_by_target(samples, &exp, &plan, &target_ids, cfg) {
         Some((x, y)) => LambdaChoice::Fixed { x, y },
         None => LambdaChoice::Gcv { n_eff: effective_targets(samples, &weights, &target_ids) },
     };
 
-    let (std, fx, fy) = fit_coefficients(samples, tier, &choice, cfg)?;
+    let (std, fx, fy) = fit_coefficients(samples, &exp, &plan, &choice, cfg)?;
 
     // Leave-one-target-out cross-validation. Training error on a ridge fit is
     // not an accuracy estimate, so this is what we report.
@@ -607,13 +804,13 @@ pub fn fit_with(
             }
             // Refit with the *same* λ the final model uses. Re-selecting λ per
             // fold would report the accuracy of a model the user never gets.
-            let Ok((fstd, ffx, ffy)) = fit_coefficients(&train, tier, &choice, cfg) else {
+            let Ok((fstd, ffx, ffy)) = fit_coefficients(&train, &exp, &plan, &choice, cfg) else {
                 cross_validated = false;
                 continue;
             };
             let mut sum = 0.0;
             for s in &test {
-                let p = predict_with(&fstd, &ffx, &ffy, tier, &s.frame);
+                let p = predict_with(&fstd, &ffx, &ffy, &exp, &s.frame);
                 let e = p.distance_to(s.target);
                 errors.push(e);
                 sum += e;
@@ -632,7 +829,7 @@ pub fn fit_with(
             let mut sum = 0.0;
             let mut count = 0usize;
             for s in samples.iter().filter(|s| s.target_index == held) {
-                let e = predict_with(&std, &fx, &fy, tier, &s.frame).distance_to(s.target);
+                let e = predict_with(&std, &fx, &fy, &exp, &s.frame).distance_to(s.target);
                 errors.push(e);
                 sum += e;
                 count += 1;
@@ -686,6 +883,15 @@ pub fn fit_with(
 
     let report = CalibrationReport {
         tier_name: tier.as_str().to_string(),
+        vertical_basis: exp.basis.as_str().to_string(),
+        openness_terms: exp.has_openness(),
+        axis_specific: plan.y.len() != plan.x.len(),
+        open_ref: if exp.has_openness() {
+            exp.open_ref.unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        },
+        vertical_range_fraction: vertical_range_fraction(samples, &std, &fx, &fy, &exp),
         samples: samples.len(),
         targets: n_targets,
         mean_error_px,
@@ -702,7 +908,7 @@ pub fn fit_with(
     };
 
     Ok(CalibrationModel {
-        tier,
+        expansion: exp,
         mean: std.mean,
         scale: std.scale,
         beta_x: fx.beta,
@@ -736,6 +942,18 @@ mod tests {
         }
     }
 
+    /// Give a synthetic frame the same value in both vertical bases.
+    ///
+    /// These tests model an eye with no lid occlusion, where the aperture centre
+    /// and the corner midpoint coincide (ADR-0025). Setting both means the
+    /// assertions below hold under either `aperture_vertical` setting, which is
+    /// the property that makes them a regression guard rather than a record of
+    /// today's default.
+    fn no_occlusion(mut f: GazeFrame) -> GazeFrame {
+        f.gy_aperture = f.gy;
+        f
+    }
+
     /// A synthetic user whose true gaze→screen map is quadratic — the model
     /// family the fitter assumes.
     fn ground_truth(gx: f64, gy: f64) -> Vec2 {
@@ -755,14 +973,14 @@ mod tests {
                 let gy = -0.25 + 0.25 * iy as f64;
                 let target = ground_truth(gx, gy);
                 for _ in 0..per_target {
-                    let frame = GazeFrame {
+                    let frame = no_occlusion(GazeFrame {
                         t_ms: 0.0,
                         ok: true,
                         quality: 1.0,
                         gx: gx + rng.noise(noise_sd),
                         gy: gy + rng.noise(noise_sd),
                         ..Default::default()
-                    };
+                    });
                     out.push(CalibSample { frame, target, target_index: idx });
                 }
                 idx += 1;
@@ -794,7 +1012,7 @@ mod tests {
         // An interpolation point that was not a calibration target.
         let gx = -0.125;
         let gy = 0.125;
-        let f = GazeFrame { ok: true, quality: 1.0, gx, gy, ..Default::default() };
+        let f = no_occlusion(GazeFrame { ok: true, quality: 1.0, gx, gy, ..Default::default() });
         let got = m.predict(&f);
         let want = ground_truth(gx, gy);
         assert!(got.distance_to(want) < 20.0, "got {got:?} want {want:?}");
@@ -825,7 +1043,7 @@ mod tests {
             s.frame.hx = 0.02;
         }
         let m = fit(&samples, 45.0, "test").unwrap();
-        assert_eq!(m.tier, FeatureTier::Full);
+        assert_eq!(m.tier(), FeatureTier::Full);
 
         // Feature indices 5 (yaw), 6 (pitch), 8 (hx) were constant.
         for &j in &[5usize, 6, 8] {
@@ -838,7 +1056,7 @@ mod tests {
         }
 
         // And the model must not blow up when the head then does move.
-        let moved = GazeFrame {
+        let moved = no_occlusion(GazeFrame {
             ok: true,
             quality: 1.0,
             gx: 0.0,
@@ -847,7 +1065,7 @@ mod tests {
             pitch: -0.4,
             hx: 0.2,
             ..Default::default()
-        };
+        });
         let p = m.predict(&moved);
         assert!(p.is_finite());
         assert!(p.x.abs() < 10_000.0 && p.y.abs() < 10_000.0, "prediction exploded: {p:?}");
@@ -862,20 +1080,20 @@ mod tests {
             let target = ground_truth(gx, gy);
             for _ in 0..25 {
                 out.push(CalibSample {
-                    frame: GazeFrame {
+                    frame: no_occlusion(GazeFrame {
                         ok: true,
                         quality: 1.0,
                         gx: gx + rng.noise(0.004),
                         gy: gy + rng.noise(0.004),
                         ..Default::default()
-                    },
+                    }),
                     target,
                     target_index: idx,
                 });
             }
         }
         let m = fit(&out, 45.0, "test").unwrap();
-        assert_eq!(m.tier, FeatureTier::Basic);
+        assert_eq!(m.tier(), FeatureTier::Basic);
         assert_eq!(m.beta_x.len(), 5);
     }
 
@@ -911,6 +1129,7 @@ mod tests {
         for s in samples.iter_mut() {
             s.frame.gx = rng.next_f64() - 0.5;
             s.frame.gy = rng.next_f64() - 0.5;
+            s.frame.gy_aperture = s.frame.gy;
         }
         let m = fit(&samples, 45.0, "test").unwrap();
         assert!(
@@ -940,7 +1159,7 @@ mod tests {
                 let gy = -0.026 + 0.026 * iy as f64;
                 let target = ground_truth(gx * 11.0, gy * 19.0);
                 for _ in 0..per_target {
-                    let frame = GazeFrame {
+                    let frame = no_occlusion(GazeFrame {
                         t_ms: 0.0,
                         ok: true,
                         quality: 1.0,
@@ -954,7 +1173,7 @@ mod tests {
                         hy: 0.04 * (iy as f64 - 1.0) + rng.noise(0.005),
                         hz: 10.0 + rng.noise(0.5),
                         ..Default::default()
-                    };
+                    });
                     out.push(CalibSample { frame, target, target_index: idx });
                 }
                 idx += 1;
@@ -1020,7 +1239,7 @@ mod tests {
             let target = ground_truth(gx * 11.0, gy * 19.0);
             for j in 0..per_target {
                 let t = (j as f64 / per_target as f64) - 0.5; // sweeps -0.5..0.5
-                let frame = GazeFrame {
+                let frame = no_occlusion(GazeFrame {
                     ok: true,
                     quality: 1.0,
                     gx: gx + rng.noise(0.015),
@@ -1031,7 +1250,7 @@ mod tests {
                     hy: 0.10 * t + rng.noise(0.005),
                     hz: 10.0 + 1.5 * t + rng.noise(0.5),
                     ..Default::default()
-                };
+                });
                 out.push(CalibSample { frame, target, target_index: 9 + k });
             }
         }
@@ -1056,7 +1275,7 @@ mod tests {
         let grid = head_confounded_samples(&mut rng, 25);
         let samples = with_head_motion(&mut rng, grid, 30);
         let m = fit(&samples, 45.0, "test").unwrap();
-        if m.tier != FeatureTier::Full {
+        if m.tier() != FeatureTier::Full {
             return; // No head terms to compare against.
         }
 
@@ -1154,7 +1373,7 @@ mod tests {
         let plain = fit_with(&samples, &unweighted(), 45.0, "test").unwrap();
         let weighted = fit_with(&samples, &CalibrationConfig::default(), 45.0, "test").unwrap();
 
-        assert_eq!(weighted.tier, plain.tier);
+        assert_eq!(weighted.tier(), plain.tier());
         assert_eq!(weighted.lambda_x.to_bits(), plain.lambda_x.to_bits());
         assert_eq!(weighted.lambda_y.to_bits(), plain.lambda_y.to_bits());
         for (i, (a, b)) in fit_guts(&weighted).iter().zip(fit_guts(&plain)).enumerate() {
@@ -1228,6 +1447,7 @@ mod tests {
             for sample in s.iter_mut().filter(|s| s.target_index == 4).skip(17) {
                 sample.frame.gx = 0.30;
                 sample.frame.gy = -0.30;
+                sample.frame.gy_aperture = -0.30;
                 sample.frame.quality = quality;
             }
             s
@@ -1244,13 +1464,13 @@ mod tests {
             let mut n = 0.0;
             for iy in 0..5 {
                 for ix in 0..5 {
-                    let f = GazeFrame {
+                    let f = no_occlusion(GazeFrame {
                         ok: true,
                         quality: 1.0,
                         gx: -0.25 + 0.125 * ix as f64,
                         gy: -0.25 + 0.125 * iy as f64,
                         ..Default::default()
-                    };
+                    });
                     sum += m.predict(&f).distance_to(clean.predict(&f));
                     n += 1.0;
                 }
@@ -1367,5 +1587,387 @@ mod tests {
         assert!(!m.report.cross_validated, "3 targets cannot be cross-validated");
         assert!(m.report.mean_error_px.is_finite());
         assert!(m.lambda_x > 0.0 && m.lambda_y > 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Vertical feature semantics (ADR-0025)
+    // -----------------------------------------------------------------------
+
+    fn corner_basis() -> CalibrationConfig {
+        CalibrationConfig { aperture_vertical: false, ..Default::default() }
+    }
+
+    /// Fill in a value the fit under test is supposed to ignore.
+    ///
+    /// Deliberately not zero and not a copy of `gy`: a switch that leaked would
+    /// then be indistinguishable from one that did not.
+    fn with_decoy_aperture(mut samples: Vec<CalibSample>) -> Vec<CalibSample> {
+        for (i, s) in samples.iter_mut().enumerate() {
+            s.frame.gy_aperture = 3.7 - 0.11 * i as f64;
+        }
+        samples
+    }
+
+    fn with_decoy_openness(mut samples: Vec<CalibSample>) -> Vec<CalibSample> {
+        for (i, s) in samples.iter_mut().enumerate() {
+            s.frame.open_left = 0.05 + 0.003 * (i % 71) as f64;
+            s.frame.open_right = 0.41 - 0.004 * (i % 53) as f64;
+        }
+        samples
+    }
+
+    /// **Off-switch guard for stage 2.** With `aperture_vertical` off the fit
+    /// must not read the aperture column at all — not "read it and weight it
+    /// near zero", which a tolerance-based test would happily accept.
+    #[test]
+    fn the_corner_basis_ignores_the_aperture_column_bit_for_bit() {
+        let mut rng = Rng(0xA9E7);
+        let samples = nine_point_samples(&mut rng, 0.005, 22);
+
+        let clean = fit_with(&samples, &corner_basis(), 45.0, "test").unwrap();
+        let decoyed =
+            fit_with(&with_decoy_aperture(samples), &corner_basis(), 45.0, "test").unwrap();
+
+        assert_eq!(clean.expansion.basis, VerticalBasis::Corner);
+        for (i, (a, b)) in fit_guts(&decoyed).iter().zip(fit_guts(&clean)).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "fit value {i} moved: {a:?} vs {b:?}");
+        }
+        assert_eq!(decoyed.lambda_y.to_bits(), clean.lambda_y.to_bits());
+    }
+
+    /// **Off-switch guard for stage 1.** The same, for openness: with the terms
+    /// off, `open_left`/`open_right` must be inert.
+    #[test]
+    fn no_openness_terms_leaves_the_openness_columns_inert_bit_for_bit() {
+        let mut rng = Rng(0x0BE7);
+        let samples = nine_point_samples(&mut rng, 0.005, 22);
+
+        let clean = fit(&samples, 45.0, "test").unwrap();
+        let decoyed = fit(&with_decoy_openness(samples), 45.0, "test").unwrap();
+
+        assert!(!clean.expansion.has_openness());
+        assert_eq!(clean.mean.len(), 18, "the expansion must not have grown");
+        for (i, (a, b)) in fit_guts(&decoyed).iter().zip(fit_guts(&clean)).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "fit value {i} moved: {a:?} vs {b:?}");
+        }
+    }
+
+    /// **Off-switch guard for the axis-specific expansion.** The reduction is
+    /// implemented by gathering a submatrix and scanning λ over it; with every
+    /// column active that gather must be a literal copy, so `solve_spd` receives
+    /// byte-identical input to what it received before ADR-0025.
+    ///
+    /// Checked at this level rather than by comparing two whole fits because it
+    /// is the *only* place the two paths could diverge, and testing it here says
+    /// so precisely.
+    #[test]
+    fn a_full_column_set_gathers_the_normal_equations_unchanged_bit_for_bit() {
+        let mut rng = Rng(0x5A11);
+        let samples = nine_point_samples(&mut rng, 0.005, 20);
+        let cfg = CalibrationConfig::default();
+        let exp = expansion_for(&samples, FeatureTier::Full, &cfg);
+        let eq = normal_equations(&samples, &exp, &sample_weights(&samples, &cfg));
+
+        let sys = axis_system(&eq, &eq.cy, eq.yy_y, eq.my, &(0..eq.p).collect::<Vec<_>>());
+        assert_eq!(sys.k, eq.p);
+        for (i, (a, b)) in sys.g.iter().zip(&eq.g).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "Gram entry {i} was not copied verbatim");
+        }
+        for (i, (a, b)) in sys.c.iter().zip(&eq.cy).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "cross-product {i} was not copied verbatim");
+        }
+    }
+
+    /// The axis-specific expansion must reduce the *vertical* axis only, and it
+    /// must produce exact zeros rather than small coefficients — that is what
+    /// lets `predict` stay oblivious to which columns an axis was fitted on.
+    #[test]
+    fn the_axis_specific_expansion_zeroes_the_horizontal_columns_of_the_vertical_fit() {
+        let mut rng = Rng(0x1D0F);
+        let samples = nine_point_samples(&mut rng, 0.005, 22);
+        let cfg = CalibrationConfig { axis_specific_vertical: true, ..Default::default() };
+
+        let reduced = fit_with(&samples, &cfg, 45.0, "test").unwrap();
+        let full = fit(&samples, 45.0, "test").unwrap();
+
+        for j in super::super::model::VERTICAL_DROPPED {
+            assert_eq!(reduced.beta_y[j], 0.0, "column {j} should have been dropped from y");
+        }
+        // The reduction is vertical-only: `gx` is the horizontal axis' whole
+        // signal and must survive there. (`roll`, `gx·yaw` and `dgx` are
+        // constant in this synthetic set, so ridge zeroes them on both axes and
+        // they cannot witness the asymmetry.)
+        assert!(reduced.beta_x[0].abs() > 100.0, "x lost its primary column");
+        // The unreduced fit really does use those columns, or the test above is
+        // asserting nothing.
+        assert!(
+            super::super::model::VERTICAL_DROPPED
+                .iter()
+                .any(|&j| full.beta_y[j].abs() > 1e-6),
+            "the baseline fit gave the dropped columns no weight either",
+        );
+        assert!(reduced.report.axis_specific);
+        assert!(!full.report.axis_specific);
+    }
+
+    /// A single spiking frame must not set the openness scale — the eye-aspect
+    /// ratio is built from landmark positions and picks up isolated artefacts.
+    #[test]
+    fn the_openness_reference_is_a_high_percentile_not_the_maximum() {
+        let mut rng = Rng(1);
+        let mut samples = nine_point_samples(&mut rng, 0.0, 20);
+        for (i, s) in samples.iter_mut().enumerate() {
+            s.frame.open_left = 0.30;
+            s.frame.open_right = 0.30 + 0.0001 * i as f64;
+        }
+        // One frame with an absurd aspect ratio, as a landmark spike produces.
+        samples[0].frame.open_left = 4.0;
+        samples[0].frame.open_right = 4.0;
+
+        let r = openness_reference(&samples).unwrap();
+        assert!(r > 0.29 && r < 0.35, "reference {r} was dragged by the spike or the noise");
+    }
+
+    /// The openness terms must reach the model when asked for, and the report
+    /// must say the scale they were divided by — a coefficient on `o` is
+    /// uninterpretable without it.
+    #[test]
+    fn the_openness_terms_widen_the_model_and_record_their_scale() {
+        let mut rng = Rng(0xBEEF);
+        let mut samples = nine_point_samples(&mut rng, 0.005, 22);
+        for (i, s) in samples.iter_mut().enumerate() {
+            let o = 0.18 + 0.0012 * (i % 97) as f64;
+            s.frame.open_left = o;
+            s.frame.open_right = o + 0.01;
+        }
+        let cfg = CalibrationConfig { openness_terms: true, ..Default::default() };
+        let m = fit_with(&samples, &cfg, 45.0, "test").unwrap();
+
+        assert!(m.expansion.has_openness());
+        assert_eq!(m.mean.len(), 20);
+        assert_eq!(m.beta_y.len(), 20);
+        assert!(m.report.openness_terms);
+        assert!(m.report.open_ref.is_finite() && m.report.open_ref > 0.0);
+        assert!(m.predict(&samples[0].frame).is_finite());
+    }
+
+    /// A 5-point run must not acquire the openness terms even when they are
+    /// switched on: `Basic` exists because there are too few distinct fixations
+    /// to identify extra coefficients, and that argument does not weaken.
+    #[test]
+    fn a_five_point_run_refuses_the_openness_terms_even_when_they_are_enabled() {
+        let mut rng = Rng(0xF15E);
+        let mut samples = nine_point_samples(&mut rng, 0.004, 25);
+        samples.retain(|s| [0usize, 2, 4, 6, 8].contains(&s.target_index));
+        for s in samples.iter_mut() {
+            s.frame.open_left = 0.25;
+            s.frame.open_right = 0.29;
+        }
+        let cfg = CalibrationConfig { openness_terms: true, ..Default::default() };
+        let m = fit_with(&samples, &cfg, 45.0, "test").unwrap();
+
+        assert_eq!(m.tier(), FeatureTier::Basic);
+        assert!(!m.expansion.has_openness());
+        assert_eq!(m.beta_y.len(), 5);
+    }
+
+    // --- the primary metric --------------------------------------------------
+
+    /// Vertical centroid of a disc of radius `r` centred at `yc`, clipped to the
+    /// band `[a, b]` — the visible part of an iris between two lid margins.
+    ///
+    /// The *area* centroid, not the midpoint of the visible band. That
+    /// distinction is the whole model: the midpoint of a doubly-clipped band is
+    /// by definition the aperture centre, which would make the aperture-relative
+    /// feature identically zero and the comparison below vacuous.
+    fn visible_iris_centroid(yc: f64, r: f64, a: f64, b: f64) -> f64 {
+        let lo = (a - yc).max(-r);
+        let hi = (b - yc).min(r);
+        let f = |s: f64| s * (r * r - s * s).max(0.0).sqrt() + r * r * (s / r).clamp(-1.0, 1.0).asin();
+        let area = f(hi) - f(lo);
+        if area <= 0.0 {
+            return yc;
+        }
+        let moment = (2.0 / 3.0)
+            * ((r * r - lo * lo).max(0.0).powf(1.5) - (r * r - hi * hi).max(0.0).powf(1.5));
+        yc + moment / area
+    }
+
+    /// A nine-point calibration under simulated eyelid occlusion, with a camera
+    /// above the screen.
+    ///
+    /// `t` runs 0 (top row, gaze roughly at the camera, eye wide open) to 1
+    /// (bottom row, strong downgaze). Lengths are in eye-width units, so `r =
+    /// 0.19` is an 11.4 mm iris in a 30 mm palpebral fissure and `k = 0.24` is
+    /// the ~7 mm the iris centre travels for a ~35° rotation of a 12 mm globe.
+    ///
+    /// Two facts about lids drive the failure:
+    ///
+    /// - the upper lid margin follows the globe down, but only until it comes to
+    ///   rest on the cornea, after which it stops (`U_SAT`);
+    /// - in strong downgaze the lower lid margin is pushed *up* by the globe, so
+    ///   the fissure narrows to a slit.
+    ///
+    /// Past `U_SAT` the aperture centre therefore moves back *up* while true
+    /// gaze keeps going down — and because the measured iris centre is the
+    /// centroid of what is still visible, it follows the aperture. That is the
+    /// fold: corner-relative `gy` rises, turns over, and comes back.
+    ///
+    /// Note what this model does *not* claim: that the aperture reference is
+    /// free. When the lid is nowhere near the iris the aperture centre is pure
+    /// lid noise added to a signal that did not need it, which is exactly why
+    /// ADR-0025 makes the reference a switch rather than a replacement.
+    fn occluded_downgaze(t: f64) -> (f64, f64) {
+        const R: f64 = 0.19; // iris radius
+        const K: f64 = 0.24; // iris centre excursion
+        const H_UPPER: f64 = 0.22; // upper lid margin when wide open
+        const L: f64 = 0.20; // the upper lid lags the globe slightly…
+        const U_SAT: f64 = 0.20; // …and stops once it meets the cornea
+        const H_LOWER: f64 = 0.20;
+        const M: f64 = 0.26; // lower lid rise in strong downgaze
+        const L_START: f64 = 0.40;
+
+        let yc = K * t;
+        let upper = -H_UPPER + L * t.min(U_SAT);
+        let lower = H_LOWER - M * (t - L_START).max(0.0);
+        let iris = visible_iris_centroid(yc, R, upper, lower);
+        // The corner midpoint is the origin by construction, so `iris` is
+        // already the corner-relative offset.
+        (iris, iris - (upper + lower) / 2.0)
+    }
+
+    /// Five rows rather than three, spanning the screen top to bottom.
+    ///
+    /// Three rows would not show the failure: a fold across three points is
+    /// still three *distinct* values of `gy`, and the model's `gy²` term fits
+    /// any three points exactly. The fold only bites once the sampling is dense
+    /// enough that two different screen rows produce the same `gy` — which is
+    /// precisely what #57's 13-target validation sweep saw and what its 9-point
+    /// calibration could not.
+    const OCCLUDED_ROWS: [f64; 5] = [0.1, 0.3, 0.5, 0.7, 0.9];
+
+    fn occluded_samples(rng: &mut Rng, per_target: usize) -> Vec<CalibSample> {
+        let mut out = Vec::new();
+        for (iy, &t) in OCCLUDED_ROWS.iter().enumerate() {
+            for ix in 0..3 {
+                let gx = -0.2 + 0.2 * ix as f64;
+                let target = Vec2::new(
+                    960.0 + 3000.0 * gx,
+                    100.0 + 1150.0 * (iy as f64 / (OCCLUDED_ROWS.len() - 1) as f64),
+                );
+                let (gy, gy_ap) = occluded_downgaze(t);
+                for _ in 0..per_target {
+                    out.push(CalibSample {
+                        frame: GazeFrame {
+                            ok: true,
+                            quality: 1.0,
+                            // Both bases get the same measurement noise, so the
+                            // comparison below is about the reference and
+                            // nothing else. 0.004 is the per-frame jitter the
+                            // debug HUD reports on this hardware.
+                            gx: gx + rng.noise(0.004),
+                            gy: gy + rng.noise(0.004),
+                            gy_aperture: gy_ap + rng.noise(0.004),
+                            open_left: 0.30 - 0.22 * t,
+                            open_right: 0.30 - 0.22 * t,
+                            ..Default::default()
+                        },
+                        target,
+                        target_index: iy * 3 + ix,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// **The deliverable's proof, and the metric #57 asked for.**
+    ///
+    /// Under simulated lid occlusion the corner-relative vertical channel folds
+    /// — the bottom row's `gy` lands back where the middle row's was — and no
+    /// polynomial can invert a folded function, so cross-validation correctly
+    /// crushes the coefficient and the predictions collapse toward a constant.
+    /// That is exactly the signature measured on hardware: 851 px of target
+    /// range producing 24 px of predicted range, 3% of the screen.
+    ///
+    /// Referencing the lid aperture instead removes the lid's own motion from
+    /// both the iris estimate and the origin, leaving a monotone signal — and
+    /// the predicted range comes back.
+    #[test]
+    fn the_aperture_basis_recovers_vertical_range_that_the_corner_basis_folds_away() {
+        // The fold has to be real, or the fit comparison below proves nothing.
+        let rows: Vec<(f64, f64)> =
+            OCCLUDED_ROWS.iter().map(|&t| occluded_downgaze(t)).collect();
+        assert!(
+            rows.windows(2).any(|w| w[1].0 < w[0].0),
+            "corner gy must turn over somewhere in the sweep: {rows:?}",
+        );
+        assert!(
+            rows.windows(2).all(|w| w[1].1 > w[0].1),
+            "aperture gy must stay strictly monotone: {rows:?}",
+        );
+
+        let mut rng = Rng(0x0CC1);
+        let samples = occluded_samples(&mut rng, 22);
+
+        let corner = fit_with(&samples, &corner_basis(), 45.0, "test").unwrap();
+        let aperture = fit_with(&samples, &CalibrationConfig::default(), 45.0, "test").unwrap();
+
+        let (c, a) =
+            (corner.report.vertical_range_fraction, aperture.report.vertical_range_fraction);
+        // Measured at 0.64 against 0.98.
+        assert!(
+            c < 0.75,
+            "the folded corner basis should lose part of the target range, got {c:.3}",
+        );
+        assert!(
+            a > 0.90,
+            "the aperture basis should recover the vertical range, got {a:.3}",
+        );
+        assert!(a > c + 0.25, "the two bases barely differed: {c:.3} vs {a:.3}");
+
+        // The sharper signature of a fold is not lost range but misplaced rows:
+        // two screen rows that share a `gy` value get one prediction between
+        // them, and both are wrong. Measured at 324 px against 39 px on a 1250
+        // px sweep — the corner basis is off by a quarter of the screen.
+        assert!(
+            corner.report.mean_error_px > 250.0,
+            "the fold should be expensive, got {:.1} px",
+            corner.report.mean_error_px,
+        );
+        assert!(
+            aperture.report.mean_error_px < 0.25 * corner.report.mean_error_px,
+            "aperture {:.1} px vs corner {:.1} px",
+            aperture.report.mean_error_px,
+            corner.report.mean_error_px,
+        );
+    }
+
+    /// The metric has to be able to say "collapsed", or it cannot diagnose
+    /// anything. A vertical channel carrying no information at all must report
+    /// close to zero, not merely a worse mean error.
+    #[test]
+    fn the_vertical_range_fraction_reports_a_collapsed_channel_as_near_zero() {
+        let mut rng = Rng(0xC0115);
+        let mut samples = nine_point_samples(&mut rng, 0.004, 22);
+        let healthy = fit(&samples, 45.0, "test").unwrap();
+        assert!(
+            healthy.report.vertical_range_fraction > 0.8,
+            "a working channel should reproduce most of the range, got {}",
+            healthy.report.vertical_range_fraction,
+        );
+
+        // Now sever the vertical signal: the same targets, but `gy` says nothing
+        // about which row the user was looking at.
+        for s in samples.iter_mut() {
+            s.frame.gy = 0.01 * rng.noise(1.0);
+            s.frame.gy_aperture = s.frame.gy;
+        }
+        let dead = fit(&samples, 45.0, "test").unwrap();
+        assert!(
+            dead.report.vertical_range_fraction < 0.1,
+            "a severed channel should report near-zero range, got {}",
+            dead.report.vertical_range_fraction,
+        );
     }
 }

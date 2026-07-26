@@ -14,6 +14,7 @@
 | R8 | **Packed IPC layout drifts** between TS and Rust. | Low | High | Single file per side, runtime width assertion on first frame (ADR-0009). |
 | R9 | **Electron/MediaPipe version churn.** | Medium | Low | Vendored model assets; pinned versions; no runtime network fetch. |
 | R10 | **Fixation clamp sticks.** A stuck cursor reads as a crash. | Medium | Medium | Hard timeout on the clamp; HUD shows clamp state explicitly. |
+| R11 | **The eyelid folds the vertical channel.** With a camera above the screen, looking at the bottom row brings the upper lid across the iris, so `gy` measured from the fixed eye corners rises, turns over and comes back — and no polynomial can invert a folded function. Measured on real hardware at 3 % of screen range (#57). | Certain on a top-mounted camera | High | Measure vertical gaze from the lid aperture instead (ADR-0025), so the lid's own motion cancels. `verticalRangeFraction` in the calibration report is the tripwire; the corner basis remains available as an A/B switch. |
 
 ## Diagnosing "it isn't accurate"
 
@@ -222,6 +223,44 @@ double-click.
    limit of gaze eccentricity.
 3. Inspect per-target held-out error in the calibration report; a single bad
    target usually means the user did not fixate it.
+
+### "Left and right work, up and down barely move"
+
+**Check "vertical" in the calibration report or the diagnostics bundle.** It
+reads e.g. `vertical: aperture basis, range 0.91 of target span`. That fraction
+is how much of the vertical distance between your top and bottom calibration
+dots the model actually reproduces. A working channel is around 0.6–1.0. **0.03
+means the model returns the same y wherever you look**, which is the failure
+ADR-0025 exists for — and it is invisible in mean error, because a collapsed
+prediction and a merely biased one can report the same number of pixels.
+
+The cause is the eyelid. With the camera above the screen, looking at the bottom
+row brings the upper lid down across the iris; the landmark model then fits the
+part of the iris it can still see, which follows the lid rather than the eye. If
+vertical gaze is measured from the eye corners — which do not move when the lid
+does — the signal reverses partway down the screen and two different rows read
+identically.
+
+**Fix:** leave *"Measure vertical gaze from the eyelid opening"* ticked (it is
+the default) and **recalibrate**. It changes what the fit is fitted on, so it
+does nothing to a model that already exists.
+
+If that is not enough:
+
+1. **Raise the camera or lower the screen.** The whole problem is that down-screen
+   is also down-camera. Anything that reduces the angle reduces the occlusion.
+2. Tick *"Let eye openness modulate vertical gaze"* and recalibrate. It spends
+   two of a nine-point calibration's ~nine effective observations, so try it
+   only after the above — but it is the right next thing if your lids sit low.
+3. If `range` is still low, the remaining suspect is that you are pitching your
+   head rather than moving your eyes, in which case `pitch` should be carrying
+   vertical. Check the scatter view (5): if the three rows of dots overlap in
+   `gy`, the input never separated them and refitting cannot help.
+
+A user who never squints, sits square, and has a well-placed camera may measure
+slightly *worse* with the aperture basis — with no lid motion to cancel it is
+lid noise added for nothing. That is why the switch exists. Compare two
+diagnostics bundles with it flipped rather than guessing.
 
 ### "Turning my head sometimes works and sometimes doesn't"
 

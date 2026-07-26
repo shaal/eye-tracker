@@ -5,7 +5,7 @@ use crate::blink::arbiter::{ClickArbiter, ClickKind};
 use crate::blink::fsm::BlinkPhase;
 use crate::blink::gesture::GestureDetector;
 use crate::calibration::{
-    CalibrationError, CalibrationModel, Collector, SampleRejection, ScatterPoint,
+    basis_of, CalibrationError, CalibrationModel, Collector, SampleRejection, ScatterPoint,
 };
 use crate::config::EngineConfig;
 use crate::filter::history::History;
@@ -351,7 +351,7 @@ impl Engine {
         self.armed_target = None;
         // Captured before the fit can fail: a *failed* calibration is precisely
         // when you want to look at what was collected.
-        self.last_scatter = collector.scatter();
+        self.last_scatter = collector.scatter(basis_of(&self.cfg.calibration));
         let model = collector
             .finish_with(&self.cfg.calibration, self.cfg.px_per_degree, display_fingerprint)
             .map_err(EngineError::Calibration)?;
@@ -730,6 +730,11 @@ mod tests {
         v[slot::QUALITY] = 1.0;
         v[slot::GX] = gx;
         v[slot::GY] = gy;
+        // These frames model an unoccluded eye, where the lid aperture centre
+        // and the corner midpoint coincide, so both vertical bases carry the
+        // same number and every test below is indifferent to which the fit
+        // reads (ADR-0025).
+        v[slot::GY_APERTURE] = gy;
         v[slot::BLINK_LEFT] = left;
         v[slot::BLINK_RIGHT] = right;
         v

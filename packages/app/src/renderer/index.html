@@ -144,6 +144,18 @@
           cursor less, instead of counting fully right up to the cut-off
         </label>
         <label class="check">
+          <input type="checkbox" id="opt-aperture-vertical" checked />
+          Measure vertical gaze from the eyelid opening — follows the lid instead
+          of the eye corners, so a drooping lid stops reading as looking up.
+          Takes effect on the next calibration
+        </label>
+        <label class="check">
+          <input type="checkbox" id="opt-openness-terms" />
+          Let eye openness modulate vertical gaze — two extra terms in the fit.
+          Costs some of a nine-point calibration's budget, so try it only if the
+          setting above is not enough
+        </label>
+        <label class="check">
           <input type="checkbox" id="opt-show-raw" />
           Show unfiltered gaze on the overlay
         </label>

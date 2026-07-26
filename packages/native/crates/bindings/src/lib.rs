@@ -9,7 +9,9 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use eye_tracker_core as core;
-use eye_tracker_core::calibration::model::{CalibrationModel, CalibrationReport, FeatureTier};
+use eye_tracker_core::calibration::model::{
+    CalibrationModel, CalibrationReport, Expansion, FeatureTier, VerticalBasis,
+};
 use eye_tracker_core::config::ClickMode;
 use eye_tracker_core::math::{Rect, Vec2};
 use eye_tracker_core::mouse::{self, Button, MouseBackend};
@@ -123,6 +125,15 @@ pub struct CalibrationConfigPatch {
     /// Lower bound on a sample's weight, so a marginal-but-admitted sample is
     /// discounted rather than deleted.
     pub weight_floor: Option<f64>,
+    /// Measure vertical gaze against the eyelid aperture centre instead of the
+    /// eye-corner midpoint (ADR-0025, stage 2). Off restores ADR-0005's
+    /// original vertical reference exactly.
+    pub aperture_vertical: Option<bool>,
+    /// Add the openness pair `o` and `gy·o` to the expansion (ADR-0025,
+    /// stage 1). Two columns, and no more.
+    pub openness_terms: Option<bool>,
+    /// Fit the vertical axis on a reduced column set (ADR-0025).
+    pub axis_specific_vertical: Option<bool>,
 }
 
 #[napi(object)]
@@ -171,7 +182,11 @@ fn apply_patch(cfg: &mut core::EngineConfig, p: &EngineConfigPatch) {
         patch!(cfg.takeover, tk, enabled, epsilon_px, resume_after_ms, require_manual_resume);
     }
     if let Some(c) = &p.calibration {
-        patch!(cfg.calibration, c, quality_weighting, weight_floor);
+        patch!(
+            cfg.calibration, c,
+            quality_weighting, weight_floor,
+            aperture_vertical, openness_terms, axis_specific_vertical
+        );
     }
     if let Some(v) = p.px_per_degree {
         cfg.px_per_degree = v;
@@ -217,6 +232,9 @@ pub struct EngineConfigView {
     pub takeover_require_manual_resume: bool,
     pub quality_weighting: bool,
     pub weight_floor: f64,
+    pub aperture_vertical: bool,
+    pub openness_terms: bool,
+    pub axis_specific_vertical: bool,
     pub px_per_degree: f64,
 }
 
@@ -259,6 +277,9 @@ impl From<&core::EngineConfig> for EngineConfigView {
             takeover_require_manual_resume: c.takeover.require_manual_resume,
             quality_weighting: c.calibration.quality_weighting,
             weight_floor: c.calibration.weight_floor,
+            aperture_vertical: c.calibration.aperture_vertical,
+            openness_terms: c.calibration.openness_terms,
+            axis_specific_vertical: c.calibration.axis_specific_vertical,
             px_per_degree: c.px_per_degree,
         }
     }
@@ -371,6 +392,21 @@ pub struct CalibrationReportJs {
     /// Kish's effective sample size. Compare against `samples` to see whether
     /// the weight spread was material.
     pub effective_samples: Option<f64>,
+
+    /// Which reference the `gy` column was measured against (ADR-0025), and the
+    /// three below it. Optional for the same reason as the four above: a
+    /// profile written before ADR-0025 has none of them, and absent means the
+    /// pre-ADR-0025 answer.
+    pub vertical_basis: Option<String>,
+    pub openness_terms: Option<bool>,
+    pub axis_specific: Option<bool>,
+    /// The openness normalizer, or absent when the openness terms were off.
+    pub open_ref: Option<f64>,
+    /// Predicted vertical spread over the calibration targets, as a fraction of
+    /// the targets' own. **The diagnostic #57 asked for** — it separates a
+    /// collapsed vertical channel, which reports near 0, from a merely biased
+    /// one, which still spans the screen.
+    pub vertical_range_fraction: Option<f64>,
 }
 
 impl From<&CalibrationReport> for CalibrationReportJs {
@@ -390,6 +426,11 @@ impl From<&CalibrationReport> for CalibrationReportJs {
             mean_weight: Some(r.mean_weight),
             min_weight: Some(r.min_weight),
             effective_samples: Some(r.effective_samples),
+            vertical_basis: Some(r.vertical_basis.clone()),
+            openness_terms: Some(r.openness_terms),
+            axis_specific: Some(r.axis_specific),
+            open_ref: Some(r.open_ref),
+            vertical_range_fraction: Some(r.vertical_range_fraction),
         }
     }
 }
@@ -408,9 +449,31 @@ pub struct ScatterPointJs {
     pub kept: bool,
 }
 
+/// Feature semantics this build understands (ADR-0025).
+///
+/// Version 1 is everything before ADR-0025: corner-relative `gy`, no openness
+/// terms. A stored profile without the field *is* version 1 — that is what its
+/// absence means, not a default we picked.
+const FEATURE_VERSION: u32 = 2;
+
 /// Serializable calibration, for persisting a profile to disk.
 #[napi(object)]
 pub struct CalibrationModelJs {
+    /// Which feature semantics the coefficients below were fitted against
+    /// (ADR-0025). Absent means version 1.
+    ///
+    /// This exists because the failure it prevents is silent. The vertical
+    /// basis changed the *meaning* of a column without changing the length of
+    /// any vector, so a profile fitted on corner-relative `gy` would load
+    /// happily against aperture-relative frames and simply predict the wrong
+    /// place — indistinguishable from ordinary drift, and no error anywhere.
+    pub feature_version: Option<u32>,
+    /// The reference `gy` was measured against: "corner" or "aperture".
+    pub vertical_basis: Option<String>,
+    /// Calibration-time openness normalizer. Present exactly when the openness
+    /// terms are in the expansion — a coefficient on `o` means nothing without
+    /// the scale `o` was divided by.
+    pub open_ref: Option<f64>,
     pub tier: String,
     pub mean: Vec<f64>,
     pub scale: Vec<f64>,
@@ -432,7 +495,10 @@ pub struct CalibrationModelJs {
 impl From<&CalibrationModel> for CalibrationModelJs {
     fn from(m: &CalibrationModel) -> Self {
         Self {
-            tier: m.tier.as_str().to_string(),
+            feature_version: Some(FEATURE_VERSION),
+            vertical_basis: Some(m.expansion.basis.as_str().to_string()),
+            open_ref: m.expansion.open_ref,
+            tier: m.expansion.tier.as_str().to_string(),
             mean: m.mean.clone(),
             scale: m.scale.clone(),
             beta_x: m.beta_x.clone(),
@@ -458,9 +524,43 @@ impl TryFrom<&CalibrationModelJs> for CalibrationModel {
             "full" => FeatureTier::Full,
             other => return Err(Error::from_reason(format!("unknown feature tier '{other}'"))),
         };
-        // A profile whose vectors do not match its tier would silently produce
-        // nonsense predictions, so reject it at load time.
-        let p = tier.len();
+
+        // Reconstruct the feature semantics the coefficients were fitted under
+        // (ADR-0025), rather than assuming the ones this session is configured
+        // for. A model that describes itself cannot be reinterpreted by a switch
+        // flipped after it was saved.
+        let version = m.feature_version.unwrap_or(1);
+        let expansion = match version {
+            // Everything before ADR-0025. The fields below did not exist, so a
+            // v1 profile that carries them was written by something that did not
+            // understand the format and is not safe to trust.
+            1 => {
+                if m.vertical_basis.is_some() || m.open_ref.is_some() {
+                    return Err(Error::from_reason(
+                        "calibration profile claims version 1 but carries ADR-0025 fields",
+                    ));
+                }
+                Expansion::legacy(tier)
+            }
+            2 => {
+                let name = m.vertical_basis.as_deref().unwrap_or(VerticalBasis::Corner.as_str());
+                let basis = VerticalBasis::from_name(name).ok_or_else(|| {
+                    Error::from_reason(format!("unknown vertical basis '{name}'"))
+                })?;
+                Expansion { tier, basis, open_ref: m.open_ref }
+            }
+            v => {
+                return Err(Error::from_reason(format!(
+                    "calibration profile has feature version {v}, but this build understands up \
+                     to {FEATURE_VERSION}; recalibrate"
+                )))
+            }
+        };
+
+        // Vectors that do not match the reconstructed expansion would silently
+        // produce nonsense predictions, so reject them at load time. This also
+        // catches the length half of a semantics change for free.
+        let p = expansion.len();
         for (name, v) in [
             ("mean", &m.mean),
             ("scale", &m.scale),
@@ -476,7 +576,7 @@ impl TryFrom<&CalibrationModelJs> for CalibrationModel {
             }
         }
         Ok(CalibrationModel {
-            tier,
+            expansion,
             mean: m.mean.clone(),
             scale: m.scale.clone(),
             beta_x: m.beta_x.clone(),
@@ -507,6 +607,19 @@ impl TryFrom<&CalibrationModelJs> for CalibrationModel {
                     .report
                     .effective_samples
                     .unwrap_or(m.report.samples as f64),
+                // A pre-ADR-0025 profile was fitted on the corner basis with no
+                // openness terms and no reduced axis, which is what the absent
+                // fields mean. The two diagnostics were never computed, so NaN
+                // is the honest value rather than a plausible-looking zero.
+                vertical_basis: m
+                    .report
+                    .vertical_basis
+                    .clone()
+                    .unwrap_or_else(|| expansion.basis.as_str().to_string()),
+                openness_terms: m.report.openness_terms.unwrap_or(expansion.has_openness()),
+                axis_specific: m.report.axis_specific.unwrap_or(false),
+                open_ref: m.report.open_ref.unwrap_or(f64::NAN),
+                vertical_range_fraction: m.report.vertical_range_fraction.unwrap_or(f64::NAN),
             },
             display_fingerprint: m.display_fingerprint.clone(),
         })
