@@ -18,11 +18,15 @@
  * the feature extractor uses, and puts numbers on how much they are moving.
  */
 
-import { EYE_A, EYE_B, type EyeLandmarks, type GazeFeatures, type Landmark } from '@eye-tracker/core';
+import {
+  EYE_A,
+  EYE_B,
+  eyeCropBox,
+  type EyeLandmarks,
+  type GazeFeatures,
+  type Landmark,
+} from '@eye-tracker/core';
 import { noiseVerdict, resolvableSteps, type SignalSummary } from './signal-stats.js';
-
-/** How much of the eye width to show around it. 1.0 would clip the lids. */
-const CROP_MARGIN = 0.55;
 
 export interface EyeZoomInputs {
   features: GazeFeatures;
@@ -58,17 +62,12 @@ function drawEye(
 ): void {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-  if (!vw || !vh || measure.width <= 0) return;
 
-  // Crop box in source pixels, centred on the eye and sized from its own width
-  // so the magnification stays constant as you move toward or away from the
-  // camera — otherwise leaning in would look like the tracking improved.
-  const cropW = measure.width * vw * (1 + 2 * CROP_MARGIN);
-  const cropH = (cropW * panelH) / panelW;
-  const cx = measure.centerX * vw;
-  const cy = measure.centerY * vh;
-  const sx = cx - cropW / 2;
-  const sy = cy - cropH / 2;
+  // The same rectangle the session recorder writes to disk (ADR-0022), so what
+  // a user judges here is what a model would later be trained on.
+  const box = eyeCropBox(measure, vw, vh, panelH / panelW);
+  if (!box) return;
+  const { x: sx, y: sy, width: cropW, height: cropH } = box;
 
   ctx.save();
   // Kept so the labels can be drawn unflipped without discarding the clip.

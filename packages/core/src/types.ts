@@ -82,6 +82,27 @@ export interface EngineFrameState {
   error?: string | null;
 }
 
+/**
+ * What the camera actually settled on, as opposed to what we asked it for.
+ *
+ * Reported rather than assumed because every field here is negotiable: the
+ * driver picks the format, and whether the exposure lock took at all depends on
+ * the camera and the Chromium build.
+ *
+ * Shared rather than renderer-local because it is also a property of any data
+ * recorded from that camera — a session recorded with exposure unlocked is not
+ * the same data as one recorded with it locked (ADR-0022).
+ */
+export interface CameraLockStatus {
+  width: number;
+  height: number;
+  frameRate: number;
+  /** `'manual'` once the lock takes; `null` when the camera reports no mode. */
+  exposureMode: string | null;
+  /** Pinned integration time, or `null` when the camera does not report one. */
+  exposureTimeMs: number | null;
+}
+
 /** Vision-side status, which main cannot know on its own. */
 export interface VisionStatus {
   cameraReady: boolean;
