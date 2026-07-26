@@ -242,11 +242,28 @@ pub struct CalibrationConfig {
     /// The corner midpoint is anchored to the socket and does not move when the
     /// lid drops, so lid-driven displacement of the iris estimate enters `gy`
     /// at full strength. The aperture centre moves with the lid, so it cancels.
-    /// Measured on real hardware (#57): the corner basis produced 24 px of
-    /// predicted vertical range for 851 px of target range.
     ///
-    /// Off restores ADR-0005's original vertical reference exactly. Both are
-    /// packed into every frame, so this switch is a refit, not a rebuild.
+    /// **Default off, because on real hardware it cancels too well.** The
+    /// premise was that the lid *lags* the globe and then stalls on the cornea,
+    /// leaving a residual to measure. Healthy lid-globe gain is close to 1 —
+    /// upper-lid kinematics during vertical gaze essentially replicate the
+    /// eye's — so `gy_aperture ≈ (1−k)·g + lid_noise` with `k ≈ 1`, which is
+    /// noise with the signal subtracted out.
+    ///
+    /// Measured (#62): the corner basis gave 24 px of predicted vertical range
+    /// for 851 px of target range; the aperture basis gave **1 px**, with
+    /// `λ_y` at 20106 and a fitted `gy` sensitivity of exactly zero. `gy`
+    /// travel was 1.459 against `gx` travel of 0.496 — three times the
+    /// horizontal excursion on a screen that is wider than it is tall, which is
+    /// what an excellent blink sensor looks like.
+    ///
+    /// Kept rather than deleted: the geometry reverses for a camera mounted
+    /// *below* the screen, and a user who genuinely squints has a residual to
+    /// recover. It is now an option with a known failure mode instead of a
+    /// default with an untested premise.
+    ///
+    /// On or off, both bases are packed into every frame, so this is a refit
+    /// rather than a rebuild.
     pub aperture_vertical: bool,
     /// Add the openness pair `o` and `gy·o` to the feature expansion.
     ///
@@ -270,7 +287,7 @@ impl Default for CalibrationConfig {
         Self {
             quality_weighting: true,
             weight_floor: 0.25,
-            aperture_vertical: true,
+            aperture_vertical: false,
             openness_terms: false,
             axis_specific_vertical: false,
         }

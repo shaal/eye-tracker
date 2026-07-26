@@ -1893,6 +1893,29 @@ mod tests {
     /// Referencing the lid aperture instead removes the lid's own motion from
     /// both the iris estimate and the origin, leaving a monotone signal — and
     /// the predicted range comes back.
+    ///
+    /// ## What this test does and does not establish (#62)
+    ///
+    /// It establishes that the *mechanism* works **in the regime the simulation
+    /// encodes**: a lid that lags the globe and then stalls on the cornea,
+    /// leaving a residual for the aperture reference to recover.
+    ///
+    /// Real physiology does not sit in that regime. Healthy lid-globe gain is
+    /// close to 1 — upper-lid motion during vertical gaze essentially
+    /// replicates the eye's — so the aperture reference subtracts nearly all of
+    /// the signal rather than only the lid's contribution. Measured on hardware
+    /// the aperture basis produced *1 px* of predicted range for 851 px of
+    /// targets, with `λ_y` at 20106 and a fitted `gy` sensitivity of zero:
+    /// worse than the corner basis it was meant to repair, which is why
+    /// `aperture_vertical` now defaults off.
+    ///
+    /// The test is kept because the mechanism is still correct where the
+    /// premise holds — a camera below the screen reverses the occlusion
+    /// geometry, and a squinting user has a genuine residual. It is retained as
+    /// a guard on an option, not as evidence for a default. Both bases are
+    /// therefore named explicitly below rather than taken from the default, so
+    /// that flipping the default can never again silently change what this
+    /// test is asserting.
     #[test]
     fn the_aperture_basis_recovers_vertical_range_that_the_corner_basis_folds_away() {
         // The fold has to be real, or the fit comparison below proves nothing.
@@ -1911,7 +1934,13 @@ mod tests {
         let samples = occluded_samples(&mut rng, 22);
 
         let corner = fit_with(&samples, &corner_basis(), 45.0, "test").unwrap();
-        let aperture = fit_with(&samples, &CalibrationConfig::default(), 45.0, "test").unwrap();
+        let aperture = fit_with(
+            &samples,
+            &CalibrationConfig { aperture_vertical: true, ..Default::default() },
+            45.0,
+            "test",
+        )
+        .unwrap();
 
         let (c, a) =
             (corner.report.vertical_range_fraction, aperture.report.vertical_range_fraction);
