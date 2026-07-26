@@ -337,9 +337,37 @@ export class VisionLoop {
     //
     // All three stay `ideal` rather than `exact`: a camera whose maximum is
     // only reachable at 5 fps should quietly stay where it is, not fail.
+    // Anchor to the aspect ratio the camera actually chose for itself, and ask
+    // only for more *width*. Height follows from the two.
+    //
+    // Asking for `width.max` and `height.max` together looks obvious and is
+    // wrong: `getCapabilities()` reports the largest value each dimension
+    // reaches across *all* supported modes, and those two maxima need not
+    // belong to the same mode. A 16:9 camera that also offers a square or
+    // portrait mode can advertise `width.max === height.max`, and requesting
+    // that pair asks for a format that does not exist. The browser then
+    // satisfies it the only way it can — by cropping or rescaling — and the
+    // first real measurement got exactly that: a 1552×1552 square stream from a
+    // 16:9 laptop camera.
+    //
+    // That is far worse than the frame-rate trade this code was written to
+    // avoid, because it is silent and it is geometric. A non-uniform squeeze
+    // scales image x and y differently, and ADR-0005's whole premise is that
+    // `gx` and `gy` are measured in a basis built from the eye's own corner
+    // landmarks: distort the axes unevenly and the basis is no longer
+    // orthonormal, roll invariance stops holding, and the horizontal and
+    // vertical signals stop being comparable. Cropping instead of scaling is
+    // milder but still throws away field of view at the sides, which is where
+    // the head goes when the user shifts.
+    const settled = track.getSettings();
+    const nativeAspect =
+      settled.width && settled.height ? settled.width / settled.height : BASE_WIDTH / BASE_HEIGHT;
+
     const format: MediaTrackConstraintSet = {
       width: { ideal: caps.width?.max ?? BASE_WIDTH },
-      height: { ideal: caps.height?.max ?? BASE_HEIGHT },
+      // `ideal` rather than `exact`: a camera that cannot hold this ratio at the
+      // requested width should give us its nearest real mode, not fail.
+      aspectRatio: { ideal: nativeAspect },
       frameRate: { ideal: 30, max: 60 },
     };
 
