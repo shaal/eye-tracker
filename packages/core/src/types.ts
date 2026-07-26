@@ -232,6 +232,13 @@ export interface TuningPatch {
     adaptiveClamp: boolean;
     clampNoiseScale: number;
     clampRadiusMax: number;
+    /**
+     * Let per-frame tracking confidence modulate smoothing continuously
+     * (ADR-0023). Off restores the pre-ADR-0023 pipeline exactly.
+     */
+    confidenceTrust: boolean;
+    /** Lower bound on the trust scalar, and so on all three modulations. */
+    trustFloor: number;
   }>;
   blink?: Partial<{
     mode: ClickMode;

@@ -133,6 +133,16 @@ export const SLIDERS: SliderSpec[] = [
   },
   {
     group: 'filter',
+    key: 'trustFloor',
+    label: 'Confidence floor',
+    hint: 'How far a badly-tracked frame may be discounted. Lower = poor frames are smoothed harder, settle sooner, and must jump further to clear the saccade threshold. Raise it if the cursor feels sluggish or slow to jump whenever tracking quality dips; 1.0 turns the effect off.',
+    min: 0.1,
+    max: 1,
+    step: 0.05,
+    value: 0.35,
+  },
+  {
+    group: 'filter',
     key: 'medianWindow',
     label: 'Spike rejection',
     hint: '1 disables it. 3 removes isolated bad frames at one frame of latency; 5 is stronger but laggier.',

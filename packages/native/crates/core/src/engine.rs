@@ -450,7 +450,17 @@ impl Engine {
             let saccade_px =
                 self.cfg.filter.saccade_px * (self.bounds.diagonal() / NOMINAL_DIAGONAL);
             let clamped_raw = self.bounds.clamp(raw);
-            let s = self.filter.update(clamped_raw, frame.t_ms, &self.cfg.filter, saccade_px);
+            // The confidence argument is the *only* coupling between tracking
+            // quality and the filter, and it is a bare scalar: replacing the
+            // `estimateQuality()` heuristic with a learned per-frame variance is
+            // a change to this one expression and nothing else (ADR-0023).
+            let s = self.filter.update(
+                clamped_raw,
+                frame.t_ms,
+                &self.cfg.filter,
+                saccade_px,
+                frame.quality,
+            );
             self.history.push(frame.t_ms, s);
             Some(s)
         } else {

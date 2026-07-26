@@ -28,5 +28,6 @@ supersedes the old one.
 | [0020](0020-no-frame-preprocessing.md)                 | No super-resolution or denoising before detection | Accepted |
 | [0021](0021-quality-weighted-calibration-fit.md)       | Tracking quality weights the calibration fit      | Accepted |
 | [0022](0022-local-session-recording.md)                | Opt-in, local-only recording of eye crops         | Accepted |
+| [0023](0023-confidence-modulated-filter-trust.md)      | Tracking confidence modulates the filter          | Accepted |
 
 Template: [0000-template.md](0000-template.md)

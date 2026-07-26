@@ -71,6 +71,12 @@ pub struct FilterConfigPatch {
     pub adaptive_clamp: Option<bool>,
     pub clamp_noise_scale: Option<f64>,
     pub clamp_radius_max: Option<f64>,
+    /// Let per-frame confidence modulate smoothing continuously (ADR-0023).
+    /// Off reproduces the pre-ADR-0023 pipeline exactly, which is what makes
+    /// this A/B-able on real hardware.
+    pub confidence_trust: Option<bool>,
+    /// Lower bound on the trust scalar, and so on all three modulations at once.
+    pub trust_floor: Option<f64>,
 }
 
 #[napi(object)]
@@ -140,7 +146,8 @@ fn apply_patch(cfg: &mut core::EngineConfig, p: &EngineConfigPatch) {
         patch!(
             cfg.filter, f,
             min_cutoff, beta, d_cutoff, saccade_px, clamp_radius, clamp_ms, clamp_max_hold_ms,
-            median_window, adaptive_clamp, clamp_noise_scale, clamp_radius_max
+            median_window, adaptive_clamp, clamp_noise_scale, clamp_radius_max,
+            confidence_trust, trust_floor
         );
     }
     if let Some(b) = &p.blink {
@@ -186,6 +193,8 @@ pub struct EngineConfigView {
     pub adaptive_clamp: bool,
     pub clamp_noise_scale: f64,
     pub clamp_radius_max: f64,
+    pub confidence_trust: bool,
+    pub trust_floor: f64,
     pub close_thresh: f64,
     pub open_thresh: f64,
     pub min_close_ms: f64,
@@ -226,6 +235,8 @@ impl From<&core::EngineConfig> for EngineConfigView {
             adaptive_clamp: c.filter.adaptive_clamp,
             clamp_noise_scale: c.filter.clamp_noise_scale,
             clamp_radius_max: c.filter.clamp_radius_max,
+            confidence_trust: c.filter.confidence_trust,
+            trust_floor: c.filter.trust_floor,
             close_thresh: c.blink.close_thresh,
             open_thresh: c.blink.open_thresh,
             min_close_ms: c.blink.min_close_ms,
