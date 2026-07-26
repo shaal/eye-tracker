@@ -1,6 +1,9 @@
 # ADR-0025: Vertical gaze is measured against the lid aperture, not the eye-corner box
 
-- **Status:** Accepted
+- **Status:** Superseded in part — **the aperture basis now defaults off** (#62).
+  The mechanism, the switches, the capacity argument, the profile guard and the
+  `verticalRangeFraction` metric all stand. Only the default changed. See
+  [Measured outcome](#measured-outcome) below.
 - **Date:** 2026-07-25
 - **Amends:** [ADR-0005](0005-roll-invariant-iris-features.md). The eye-local
   basis, the eye-width normalizer, and the A/B symmetry construction all stand
@@ -251,12 +254,87 @@ further downstream.
   quieter version of the same class of bug. One helper (`basis_of`) is the single
   place that decides.
 
+## Measured outcome
+
+The first hardware session met the first revisit criterion below on the first
+try, and by a wide margin.
+
+| | corner basis (9 targets) | aperture basis (13 targets) |
+| --- | --- | --- |
+| `verticalRangeFraction` | 0.03 | **0.007** |
+| λ_y | 675 | **20106** |
+| fitted `gy` sensitivity | 416 px/unit | **0 px/unit** |
+
+Predicted y by target row on the aperture basis: 607.7, 609.2, 608.3, 608.8,
+608.0, 608.1, 608.3. **851 px of target span produced 1 px of predicted span.**
+The vertical model is exactly an intercept.
+
+### Why: the lid does not lag, it tracks
+
+This ADR's premise was that the upper lid *lags* the globe and then stalls on
+the cornea, so referencing the aperture removes the lid's contribution and
+leaves a residual proportional to gaze.
+
+Healthy lid–globe gain is close to **1**. Upper-lid kinematics during vertical
+gaze essentially replicate the eye's — Becker & Fuchs (*J Neurophysiol*, 1988)
+find eye and lid take essentially the same average position during fixation,
+with downward lid saccades matching eye amplitude and velocity closely. Lag and
+attenuation are what appear as *pathology*, not as the healthy default. So:
+
+```
+measured_iris_v  ≈  g + occlusion_bias(lid)
+aperture_v       ≈  k·g + lid_noise            (k ≈ 1)
+gy_aperture      ≈  (1−k)·g + noise            ≈  lid_noise
+```
+
+The aperture reference does not un-fold the signal. It **cancels** it. The
+measurement agrees: `gy` travel came out at 1.459 against `gx` travel of 0.496
+— three times the horizontal excursion, on a screen that is wider than it is
+tall. That is what an excellent blink sensor looks like.
+
+### What the simulation got wrong, and the lesson
+
+The synthetic test was not sloppy. It used the *area* centroid of a clipped
+disc rather than the visible band's midpoint — specifically so the aperture
+feature could not come out identically zero and make the comparison vacuous —
+and its constants were derived anatomy (0.24 eye-widths of iris excursion for
+the ~35° a laptop screen subtends on a 12 mm globe).
+
+It still misled, because it encoded the **pathological lid regime** the fix was
+designed for rather than the healthy one. Every assertion about the arithmetic
+held; the premise underneath was never tested.
+
+**A well-built simulation of the wrong regime is more convincing than a sloppy
+one, and therefore more dangerous.** Validating a model's arithmetic is not
+validating its premise, and the test suite has no way to tell the difference.
+This is the argument for measuring on hardware before promoting a default, not
+after.
+
+### What was kept
+
+The default flipped; nothing else did. The mechanism is still correct where the
+premise holds — a camera mounted *below* the screen reverses the occlusion
+geometry, and a user who genuinely squints has a residual to recover. Both
+bases are still packed into every frame, so this remains a refit rather than a
+rebuild, and the switch is now an option with a known failure mode instead of a
+default with an untested premise.
+
+The synthetic test is retained as a guard on that option, with both bases named
+explicitly rather than taken from the default, so flipping the default can
+never again silently change what it asserts.
+
+### What this did not break
+
+The same session improved on every other axis, though it also used 13
+calibration targets rather than 9, so the causes should not be conflated:
+horizontal range 64% → 78%, precision ±26 px (0.57°) → ±8 px (0.17°), noise
+floor ±12 px → ±4 px, and `gx` travel 1.204 → 0.496 — finally matching the ~0.5
+physical prior in `debug/eye-zoom.ts`.
+
 ### What we would need to see to revisit this
 
-- A hardware session where `apertureVertical` **off** produces a larger
-  `verticalRangeFraction` than **on**. That would mean the lid is not the
-  dominant vertical nuisance for that user and geometry, and the corner
-  reference's stability is worth more than the un-fold.
+- ~~A hardware session where `apertureVertical` **off** produces a larger
+  `verticalRangeFraction` than **on**.~~ **Met — see above. Default is now off.**
 - `verticalRangeFraction` still low with the aperture basis on. The remaining
   candidates from #57 are then the collection regime rather than the features:
   the user pitching their head instead of elevating their eyes (make pose the
