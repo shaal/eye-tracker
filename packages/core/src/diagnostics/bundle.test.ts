@@ -468,6 +468,87 @@ test('a run with too few scored points says so instead of inventing a pattern', 
 });
 
 // ---------------------------------------------------------------------------
+// Axis collapse (#58) — a dead channel is not a displaced one
+// ---------------------------------------------------------------------------
+
+/**
+ * One axis collapsed to a near-constant prediction, the other functional.
+ * The collapsing axis's target/predicted pairs are #57's measured row means
+ * from the real session that #58 was filed against — predicted y stayed in
+ * 369-393 while target y swept 239-1090. The live axis has no published
+ * per-point data (the issue reports only that horizontal "recovered"), so it
+ * is a representative small residual, kept well clear of a -1 slope.
+ */
+function axisCollapseRun(collapseAxis: 'x' | 'y') {
+  const grid: Array<[number, number]> = [
+    [0.5, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.8],
+    [0.5, 0.18],
+    [0.35, 0.65],
+    [0.82, 0.5],
+    [0.2, 0.8],
+    [0.65, 0.35],
+    [0.5, 0.82],
+    [0.8, 0.2],
+    [0.35, 0.35],
+    [0.18, 0.5],
+    [0.65, 0.65],
+  ];
+  const predicted: Record<string, number> = {
+    '0.18': 369,
+    '0.2': 374,
+    '0.35': 376,
+    '0.5': 380,
+    '0.65': 391,
+    '0.8': 378,
+    '0.82': 393,
+  };
+  return grid.map(([fx, fy]) => {
+    const collapseFrac = collapseAxis === 'y' ? fy : fx;
+    const liveFrac = collapseAxis === 'y' ? fx : fy;
+    const collapsePos = 1329 * collapseFrac;
+    const livePos = 1512 * liveFrac;
+    const collapseBias = (predicted[String(collapseFrac)] ?? 380) - collapsePos;
+    const liveBias = -12 + 0.02 * (livePos - 756);
+    const target =
+      collapseAxis === 'y' ? { x: livePos, y: collapsePos } : { x: collapsePos, y: livePos };
+    const bias =
+      collapseAxis === 'y' ? { x: liveBias, y: collapseBias } : { x: collapseBias, y: liveBias };
+    return cloud(target, bias, 10);
+  });
+}
+
+test('the #58 session classifies the collapsed vertical axis as a collapse, not a uniform offset', () => {
+  const pattern = describeBiasPattern(summarizeValidation(axisCollapseRun('y'), PX_PER_DEG).targets);
+  assert.match(pattern, /y axis has collapsed/);
+  assert.doesNotMatch(pattern, /uniform offset/);
+  assert.doesNotMatch(pattern, /recalibrat/i);
+});
+
+test('a functional axis alongside a collapsed one is reported independently, per axis', () => {
+  const pattern = describeBiasPattern(summarizeValidation(axisCollapseRun('y'), PX_PER_DEG).targets);
+  assert.match(pattern, /y axis has collapsed/);
+  assert.match(pattern, /x axis is tracking normally/);
+});
+
+test('axis collapse is detected on x symmetrically with y', () => {
+  const pattern = describeBiasPattern(summarizeValidation(axisCollapseRun('x'), PX_PER_DEG).targets);
+  assert.match(pattern, /x axis has collapsed/);
+  assert.match(pattern, /y axis is tracking normally/);
+  assert.doesNotMatch(pattern, /recalibrat/i);
+});
+
+test('a genuine uniform offset is unaffected by the collapse check', () => {
+  // Regression guard for #58's own fix: the synthetic uniform-offset fixture
+  // above has near-zero bias/target slope on both axes, so it must keep
+  // classifying as a uniform offset rather than tripping the new check.
+  const pattern = describeBiasPattern(summarizeValidation(uniformOffsetRun(), PX_PER_DEG).targets);
+  assert.doesNotMatch(pattern, /collapsed/);
+  assert.match(pattern, /uniform offset/);
+});
+
+// ---------------------------------------------------------------------------
 // Shape and summary
 // ---------------------------------------------------------------------------
 
