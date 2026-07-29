@@ -2,7 +2,7 @@ pub mod collector;
 pub mod fit;
 pub mod model;
 
-pub use collector::{basis_of, Collector, SampleRejection, ScatterPoint};
+pub use collector::{basis_of, Collector, RejectionCounts, SampleRejection, ScatterPoint};
 pub use fit::{fit, fit_with, CalibSample, CalibrationError};
 pub use model::{
     CalibrationModel, CalibrationReport, Expansion, FeatureTier, VerticalBasis, MAX_FEATURES,

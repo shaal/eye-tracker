@@ -1,4 +1,5 @@
 import {
+  CALIBRATION_SAMPLING,
   CALIBRATION_TIMING,
   FIXATION_INSTRUCTION,
   FIXATION_PROMPT,
@@ -427,7 +428,14 @@ export class EngineBridge {
         this.calibration = { ...this.calibration, phase: 'settle' };
         this.emitCalibration();
       }
-      this.runSettleAndCollect(index, settleMs, collectMs, discardMs, gapMs);
+      this.runSettleAndCollect(
+        index,
+        settleMs,
+        collectMs,
+        discardMs,
+        gapMs,
+        headMotion ? null : CALIBRATION_SAMPLING.targetSamples,
+      );
     }, instructionMs);
   }
 
@@ -449,19 +457,35 @@ export class EngineBridge {
     if (index < 0 || index >= this.calibration.targets.length) return;
 
     this.clearCalibrationTimer();
-    const t = this.isHeadMotionIndex(index) ? HEAD_MOTION_TIMING : CALIBRATION_TIMING;
+    const headMotion = this.isHeadMotionIndex(index);
+    const t = headMotion ? HEAD_MOTION_TIMING : CALIBRATION_TIMING;
     this.calibration = { ...this.calibration, phase: 'settle' };
     this.emitCalibration();
-    this.runSettleAndCollect(index, t.settleMs, t.collectMs, t.discardMs, t.gapMs);
+    this.runSettleAndCollect(
+      index,
+      t.settleMs,
+      t.collectMs,
+      t.discardMs,
+      t.gapMs,
+      headMotion ? null : CALIBRATION_SAMPLING.targetSamples,
+    );
   }
 
-  /** The per-target sampling sequence, once any instruction card has cleared. */
+  /**
+   * The per-target sampling sequence, once any instruction card has cleared.
+   *
+   * `wantSamples` switches the collect phase from a fixed duration to "until we
+   * have enough, or until the ceiling" — see `CALIBRATION_SAMPLING`. Passing
+   * `null` keeps the original time-driven behaviour, which is what the
+   * head-motion steps need.
+   */
   private runSettleAndCollect(
     index: number,
     settleMs: number,
     collectMs: number,
     discardMs: number,
     gapMs: number,
+    wantSamples: number | null = null,
   ): void {
     this.calibrationTimer = setTimeout(() => {
       if (!this.calibration.active) return;
@@ -474,7 +498,7 @@ export class EngineBridge {
         if (!this.calibration.active) return;
         this.engine.setCalibrationTarget(index);
 
-        this.calibrationTimer = setTimeout(() => {
+        const done = (): void => {
           if (!this.calibration.active) return;
           this.engine.setCalibrationTarget(null);
           this.calibration = {
@@ -484,7 +508,36 @@ export class EngineBridge {
           this.emitCalibration();
 
           this.calibrationTimer = setTimeout(() => this.advanceCalibration(index + 1), gapMs);
-        }, collectMs - discardMs);
+        };
+
+        if (wantSamples === null) {
+          this.calibrationTimer = setTimeout(done, collectMs - discardMs);
+          return;
+        }
+
+        // Count-driven. The nominal window is still the floor, so a fast camera
+        // does not race through the dots faster than the eye can fixate them.
+        const minMs = collectMs - discardMs;
+        const startedAt = Date.now();
+        const poll = (): void => {
+          if (!this.calibration.active) return;
+          const elapsed = Date.now() - startedAt;
+          const enough =
+            elapsed >= minMs && this.engine.calibrationProgress(index) >= wantSamples;
+          if (enough || elapsed >= CALIBRATION_SAMPLING.maxCollectMs) {
+            done();
+            return;
+          }
+          // Surfacing the running count is what makes a starved camera visible
+          // while it is happening rather than only in the post-mortem.
+          this.calibration = {
+            ...this.calibration,
+            samples: this.engine.calibrationProgress(index),
+          };
+          this.emitCalibration();
+          this.calibrationTimer = setTimeout(poll, CALIBRATION_SAMPLING.pollMs);
+        };
+        this.calibrationTimer = setTimeout(poll, CALIBRATION_SAMPLING.pollMs);
       }, discardMs);
     }, settleMs);
   }
@@ -495,6 +548,23 @@ export class EngineBridge {
       const model = this.engine.finishCalibration(this.fingerprint);
       saveProfile(this.fingerprint, model as unknown as CalibrationProfile);
       return model.report as unknown as CalibrationReport;
+    } catch (err) {
+      // "needs at least 3 distinct targets, got 0" states the symptom and
+      // nothing else — it cannot tell a camera that never delivered a frame
+      // from one whose every frame was rejected, and those have opposite
+      // fixes. The engine counted both, so say which happened.
+      const d = this.engine.calibrationDiagnostics();
+      console.error(
+        `[calibration] failed — frames seen ${d.framesSeen}, stale ${d.framesStale}, ` +
+          `accepted ${d.accepted}, rejected: noFace ${d.rejectedNoFace}, ` +
+          `blinking ${d.rejectedBlinking}, lowQuality ${d.rejectedLowQuality}, ` +
+          `unknownTarget ${d.rejectedUnknownTarget}`,
+      );
+      if (d.explanation) {
+        const base = err instanceof Error ? err.message : String(err);
+        throw new Error(`${base} — ${d.explanation}`);
+      }
+      throw err;
     } finally {
       // The fit can legitimately fail (too few samples, degenerate data). The
       // native side has already dropped its collector by then, so leaving the

@@ -5,7 +5,8 @@ use crate::blink::arbiter::{ClickArbiter, ClickKind};
 use crate::blink::fsm::BlinkPhase;
 use crate::blink::gesture::GestureDetector;
 use crate::calibration::{
-    basis_of, CalibrationError, CalibrationModel, Collector, SampleRejection, ScatterPoint,
+    basis_of, CalibrationError, CalibrationModel, Collector, RejectionCounts, SampleRejection,
+    ScatterPoint,
 };
 use crate::config::EngineConfig;
 use crate::filter::history::History;
@@ -17,6 +18,20 @@ use crate::mouse::{Button, MouseBackend, MouseError};
 /// Diagonal of a 1080p display. Pixel thresholds are authored against this and
 /// scaled to the actual work area (ADR-0007).
 const NOMINAL_DIAGONAL: f64 = 2202.9;
+
+/// A backwards jump larger than this is read as a new clock rather than a late
+/// frame.
+///
+/// Frame timestamps come from the renderer's `performance.now()`, which is
+/// measured from *that document's* start — so reloading the control window
+/// restarts it near zero while the engine, which lives in the main process,
+/// still holds a much larger `last_frame_ms`. Rejecting those as out-of-order
+/// is correct for a frame that arrives a few milliseconds late and catastrophic
+/// for a reload: every subsequent frame is stale forever, tracking stops, and
+/// nothing says why. One second is far beyond any real reordering (a 30 Hz
+/// camera reorders by tens of milliseconds at worst) and far below the
+/// magnitude of a reload jump.
+const CLOCK_RESET_MS: f64 = 1000.0;
 
 /// Why the cursor is not being driven.
 ///
@@ -220,6 +235,134 @@ pub struct Engine {
     manual_until_ms: Option<f64>,
     /// Latched when `require_manual_resume` is set.
     manual_latched: bool,
+    /// Frames pushed since `begin_calibration`, counted before any gate. Zero
+    /// means nothing reached the engine at all.
+    calib_frames_seen: usize,
+    /// Of those, how many were dropped as out-of-order. A run where these two
+    /// are equal never got past the staleness check — the renderer's clock
+    /// went backwards, which a reload does.
+    calib_frames_stale: usize,
+    /// Survives `finish_calibration` taking the collector.
+    last_calib_diagnostics: CalibrationDiagnostics,
+}
+
+/// A calibration run's intake, for explaining a failure (see
+/// [`Engine::calibration_diagnostics`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CalibrationDiagnostics {
+    pub frames_seen: usize,
+    pub frames_stale: usize,
+    pub accepted: usize,
+    pub rejections: RejectionCounts,
+}
+
+impl CalibrationDiagnostics {
+    /// One sentence naming the most likely cause, or `None` when samples were
+    /// collected normally and the failure lies elsewhere.
+    pub fn explain(&self) -> Option<String> {
+        if self.accepted > 0 {
+            return None;
+        }
+        if self.frames_seen == 0 {
+            return Some(
+                "no camera frames reached the engine during the run — the renderer sent none"
+                    .to_string(),
+            );
+        }
+        if self.frames_stale == self.frames_seen {
+            return Some(format!(
+                "all {} frames were rejected as out-of-order; the renderer's clock ran \
+                 backwards, which happens when the window reloads mid-session — restart the app",
+                self.frames_seen,
+            ));
+        }
+        match self.rejections.dominant() {
+            Some(reason) => Some(format!(
+                "{} of {} frames were rejected, most often: {reason}",
+                self.rejections.total(),
+                self.frames_seen,
+            )),
+            None => Some(format!(
+                "{} frames arrived but none was offered for a target — collection was never armed",
+                self.frames_seen,
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    fn diag(seen: usize, stale: usize, accepted: usize) -> CalibrationDiagnostics {
+        CalibrationDiagnostics {
+            frames_seen: seen,
+            frames_stale: stale,
+            accepted,
+            rejections: RejectionCounts::default(),
+        }
+    }
+
+    #[test]
+    fn a_run_that_collected_samples_is_not_explained_away() {
+        assert_eq!(diag(100, 0, 40).explain(), None);
+    }
+
+    #[test]
+    fn zero_frames_points_upstream_rather_than_at_a_threshold() {
+        let msg = diag(0, 0, 0).explain().expect("should explain");
+        assert!(msg.contains("no camera frames"), "{msg}");
+    }
+
+    #[test]
+    fn an_entirely_stale_run_names_the_clock_and_says_what_to_do() {
+        let msg = diag(400, 400, 0).explain().expect("should explain");
+        assert!(msg.contains("out-of-order"), "{msg}");
+        assert!(msg.contains("restart"), "{msg}");
+    }
+
+    #[test]
+    fn a_rejected_run_names_the_commonest_reason() {
+        let mut d = diag(300, 0, 0);
+        d.rejections = RejectionCounts { no_face: 10, low_quality: 290, ..Default::default() };
+        let msg = d.explain().expect("should explain");
+        assert!(msg.contains("quality"), "{msg}");
+        assert!(msg.contains("300"), "{msg}");
+    }
+
+    #[test]
+    fn frames_that_arrived_but_were_never_offered_are_distinguished() {
+        // Nothing rejected and nothing accepted: the target was never armed,
+        // which is a different bug from any threshold being too strict.
+        let msg = diag(250, 0, 0).explain().expect("should explain");
+        assert!(msg.contains("never armed"), "{msg}");
+    }
+
+    #[test]
+    fn a_partly_stale_run_is_not_blamed_on_the_clock() {
+        let mut d = diag(300, 150, 0);
+        d.rejections = RejectionCounts { blinking: 150, ..Default::default() };
+        let msg = d.explain().expect("should explain");
+        assert!(!msg.contains("out-of-order"), "{msg}");
+        assert!(msg.contains("blink"), "{msg}");
+    }
+
+    #[test]
+    fn the_dominant_reason_wins_over_a_larger_total_elsewhere() {
+        let counts = RejectionCounts {
+            no_face: 5,
+            blinking: 7,
+            low_quality: 3,
+            unknown_target: 0,
+        };
+        assert_eq!(counts.dominant(), Some("blink in progress"));
+        assert_eq!(counts.total(), 15);
+    }
+
+    #[test]
+    fn nothing_rejected_has_no_dominant_reason() {
+        assert_eq!(RejectionCounts::default().dominant(), None);
+    }
 }
 
 impl Engine {
@@ -245,6 +388,9 @@ impl Engine {
             last_error: None,
             manual_until_ms: None,
             manual_latched: false,
+            calib_frames_seen: 0,
+            calib_frames_stale: 0,
+            last_calib_diagnostics: CalibrationDiagnostics::default(),
         }
     }
 
@@ -316,6 +462,8 @@ impl Engine {
 
     pub fn begin_calibration(&mut self, targets: Vec<Vec2>) {
         self.collector = Some(Collector::new(targets));
+        self.calib_frames_seen = 0;
+        self.calib_frames_stale = 0;
         // Stale scatter from a previous run would be read as belonging to this
         // one, which is worse than showing nothing.
         self.last_scatter.clear();
@@ -328,6 +476,27 @@ impl Engine {
     /// offered to the collector for `target_index`.
     pub fn set_calibration_target(&mut self, target_index: Option<usize>) {
         self.armed_target = target_index;
+    }
+
+    /// Drop every piece of state that is only meaningful against the previous
+    /// frame clock (see [`CLOCK_RESET_MS`]).
+    ///
+    /// Deliberately does NOT touch the calibration collector or the fitted
+    /// model. A reload mid-run should cost the samples' continuity, not the
+    /// samples themselves, and certainly not a model the user already earned.
+    fn begin_clock_epoch(&mut self) {
+        self.last_frame_ms = None;
+        self.tracked_since_ms = None;
+        self.fps = 0.0;
+        self.filter.reset();
+        self.history.clear();
+        self.gestures.reset();
+        self.arbiter.reset();
+        // Timestamps from the old epoch are far in the future relative to the
+        // new one; left alone they would suppress movement or hold a takeover
+        // open indefinitely.
+        self.enabled_at_ms = 0.0;
+        self.manual_until_ms = None;
     }
 
     pub fn cancel_calibration(&mut self) {
@@ -343,10 +512,35 @@ impl Engine {
         self.collector.as_ref().map_or(0, |c| c.count_for(target_index))
     }
 
+    /// Why a calibration run collected what it did.
+    ///
+    /// Exists because `got 0 targets` is unactionable on its own: it cannot
+    /// distinguish a camera that never delivered a frame from one whose every
+    /// frame was rejected, and those have opposite fixes. `frames_seen` counts
+    /// pushes that reached the engine at all, so zero there points upstream —
+    /// at the renderer or the camera — rather than at any threshold here.
+    /// Live while a run is in progress; afterwards, the last finished run's —
+    /// `finish_calibration` consumes the collector, and a failed run is exactly
+    /// when these numbers are wanted.
+    pub fn calibration_diagnostics(&self) -> CalibrationDiagnostics {
+        let Some(c) = self.collector.as_ref() else {
+            return self.last_calib_diagnostics;
+        };
+        CalibrationDiagnostics {
+            frames_seen: self.calib_frames_seen,
+            frames_stale: self.calib_frames_stale,
+            accepted: c.accepted_count(),
+            rejections: c.rejections(),
+        }
+    }
+
     pub fn finish_calibration(
         &mut self,
         display_fingerprint: impl Into<String>,
     ) -> Result<CalibrationModel, EngineError> {
+        // Snapshotted before the collector is consumed, so the numbers survive
+        // into the failure path that needs them.
+        self.last_calib_diagnostics = self.calibration_diagnostics();
         let collector = self.collector.take().ok_or(EngineError::NoCalibrationInProgress)?;
         self.armed_target = None;
         // Captured before the fit can fail: a *failed* calibration is precisely
@@ -382,14 +576,28 @@ impl Engine {
     pub fn push_frame(&mut self, slots: &[f64]) -> Result<FrameOutput, EngineError> {
         let frame = GazeFrame::decode(slots).map_err(EngineError::Frame)?;
 
+        // Counted before every gate below, so a run that collects nothing can
+        // still say whether frames were arriving at all.
+        if self.collector.is_some() {
+            self.calib_frames_seen += 1;
+        }
+
         // Reject out-of-order frames rather than integrating them. A late frame
         // would corrupt the One Euro speed estimate and could rewind the blink
-        // FSM's clock (ADR-0009).
+        // FSM's clock (ADR-0009). A *large* backwards jump is a different event
+        // — a new clock, not a late frame — and is re-based rather than dropped.
         if let Some(last) = self.last_frame_ms {
             if frame.t_ms <= last {
-                let mut out = self.snapshot(Guard::StaleFrame, &frame);
-                out.stale = true;
-                return Ok(out);
+                if last - frame.t_ms > CLOCK_RESET_MS {
+                    self.begin_clock_epoch();
+                } else {
+                    if self.collector.is_some() {
+                        self.calib_frames_stale += 1;
+                    }
+                    let mut out = self.snapshot(Guard::StaleFrame, &frame);
+                    out.stale = true;
+                    return Ok(out);
+                }
             }
         }
 
@@ -720,6 +928,62 @@ mod tests {
     /// Pack a frame the way the renderer would, with both eyes equal.
     fn pack(t_ms: f64, gx: f64, gy: f64, closure: f64) -> Vec<f64> {
         pack_eyes(t_ms, gx, gy, closure, closure)
+    }
+
+    #[test]
+    fn a_slightly_late_frame_is_still_rejected_as_stale() {
+        // The ordinary reordering case must keep working: this is what protects
+        // the One Euro speed estimate.
+        let (mut e, _log) = engine();
+        e.push_frame(&pack(1000.0, 0.1, 0.1, 0.0)).unwrap();
+        let out = e.push_frame(&pack(980.0, 0.1, 0.1, 0.0)).unwrap();
+        assert!(out.stale, "a 20 ms backwards step is a late frame, not a new clock");
+    }
+
+    #[test]
+    fn a_repeated_timestamp_is_still_rejected_as_stale() {
+        let (mut e, _log) = engine();
+        e.push_frame(&pack(1000.0, 0.1, 0.1, 0.0)).unwrap();
+        let out = e.push_frame(&pack(1000.0, 0.1, 0.1, 0.0)).unwrap();
+        assert!(out.stale);
+    }
+
+    #[test]
+    fn a_renderer_reload_does_not_wedge_the_engine_forever() {
+        // The bug this guards: `performance.now()` restarts near zero when the
+        // control window reloads, while the engine keeps the old high water
+        // mark. Without re-basing, every later frame is stale and tracking
+        // never recovers until the app is restarted.
+        let (mut e, _log) = engine();
+        for i in 0..30 {
+            e.push_frame(&pack(60_000.0 + f64::from(i) * 33.0, 0.1, 0.1, 0.0)).unwrap();
+        }
+
+        let first_after_reload = e.push_frame(&pack(12.0, 0.1, 0.1, 0.0)).unwrap();
+        assert!(!first_after_reload.stale, "a reload must not be read as a late frame");
+
+        let next = e.push_frame(&pack(45.0, 0.1, 0.1, 0.0)).unwrap();
+        assert!(!next.stale, "the new clock must be accepted from then on");
+    }
+
+    #[test]
+    fn a_reload_mid_calibration_keeps_the_samples_already_collected() {
+        // Losing continuity is acceptable; losing the user's fixations is not.
+        let (mut e, _log) = engine();
+        e.begin_calibration(vec![Vec2::new(100.0, 100.0)]);
+        e.set_calibration_target(Some(0));
+        for i in 0..10 {
+            e.push_frame(&pack(50_000.0 + f64::from(i) * 33.0, 0.1, 0.1, 0.0)).unwrap();
+        }
+        let before = e.calibration_progress(0);
+        assert!(before > 0, "sanity: samples were being collected");
+
+        e.push_frame(&pack(10.0, 0.1, 0.1, 0.0)).unwrap();
+        assert!(
+            e.calibration_progress(0) >= before,
+            "the reload must not discard collected samples",
+        );
+        assert!(e.is_calibrating(), "the run must survive the clock reset");
     }
 
     /// Pack with independent per-eye closure, for wink tests.

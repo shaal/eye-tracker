@@ -39,16 +39,65 @@ pub struct ScatterPoint {
     pub kept: bool,
 }
 
+/// Why the offered frames did not become samples.
+///
+/// A bare total cannot answer the only question that matters when a run
+/// collects nothing — *which* gate closed. "No face in any of 400 frames" is a
+/// camera or framing problem; "every frame was a blink" is a threshold problem;
+/// "low quality throughout" is lighting or distance. Reporting them apart is
+/// the difference between a fixable error and `got 0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RejectionCounts {
+    pub no_face: usize,
+    pub blinking: usize,
+    pub low_quality: usize,
+    pub unknown_target: usize,
+}
+
+impl RejectionCounts {
+    pub fn total(&self) -> usize {
+        self.no_face + self.blinking + self.low_quality + self.unknown_target
+    }
+
+    /// The single largest reason, for a one-line summary. `None` when nothing
+    /// was rejected at all — which, paired with zero accepted samples, means no
+    /// frame was ever offered.
+    pub fn dominant(&self) -> Option<&'static str> {
+        let mut best: Option<(&'static str, usize)> = None;
+        for (label, n) in [
+            ("no face detected", self.no_face),
+            ("blink in progress", self.blinking),
+            ("tracking quality below the minimum", self.low_quality),
+            ("target index out of range", self.unknown_target),
+        ] {
+            if n > 0 && best.is_none_or(|(_, b)| n > b) {
+                best = Some((label, n));
+            }
+        }
+        best.map(|(label, _)| label)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Collector {
     targets: Vec<Vec2>,
     samples: Vec<CalibSample>,
     rejected: usize,
+    rejections: RejectionCounts,
 }
 
 impl Collector {
     pub fn new(targets: Vec<Vec2>) -> Self {
-        Self { targets, samples: Vec::new(), rejected: 0 }
+        Self {
+            targets,
+            samples: Vec::new(),
+            rejected: 0,
+            rejections: RejectionCounts::default(),
+        }
+    }
+
+    pub fn rejections(&self) -> RejectionCounts {
+        self.rejections
     }
 
     pub fn targets(&self) -> &[Vec2] {
@@ -76,6 +125,10 @@ impl Collector {
         min_quality: f64,
     ) -> SampleRejection {
         let Some(&target) = self.targets.get(target_index) else {
+            // Counted like any other rejection: an armed index that does not
+            // exist would otherwise drop every frame while reporting nothing.
+            self.rejected += 1;
+            self.rejections.unknown_target += 1;
             return SampleRejection::UnknownTarget;
         };
         // Rejection order matters only for the reason reported back to the UI.
@@ -91,6 +144,13 @@ impl Collector {
 
         if reason != SampleRejection::Accepted {
             self.rejected += 1;
+            match reason {
+                SampleRejection::NoFace => self.rejections.no_face += 1,
+                SampleRejection::Blinking => self.rejections.blinking += 1,
+                SampleRejection::LowQuality => self.rejections.low_quality += 1,
+                SampleRejection::UnknownTarget => self.rejections.unknown_target += 1,
+                SampleRejection::Accepted => unreachable!("guarded above"),
+            }
             return reason;
         }
 

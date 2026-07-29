@@ -8,6 +8,10 @@
 pub mod macos;
 #[cfg(not(target_os = "macos"))]
 pub mod fallback;
+// Built on every platform, not just the one that uses it, so the mapping stays
+// unit-testable from a mac checkout — where nobody would otherwise notice it
+// breaking.
+pub mod geometry;
 pub mod null;
 pub mod permissions;
 
