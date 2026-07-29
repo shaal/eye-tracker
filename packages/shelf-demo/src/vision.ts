@@ -53,20 +53,28 @@ export class VisionLoop {
       this.video.srcObject = this.stream;
       await this.video.play();
 
-      onStatus({ kind: 'loading', message: 'Loading face model…' });
-      const fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
-      const options = (delegate: 'GPU' | 'CPU') => ({
-        baseOptions: { modelAssetPath: MODEL_PATH, delegate },
-        runningMode: 'VIDEO' as const,
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: true,
-      });
-      try {
-        this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('GPU'));
-      } catch (gpuErr) {
-        console.warn('[vision] GPU delegate failed, falling back to CPU:', gpuErr);
-        this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('CPU'));
+      // Reused across stop()/start() cycles rather than recreated — Live and
+      // Replay are meant to be toggled freely, and recreating the model on
+      // every toggle both leaked the previous WASM/GPU FaceLandmarker
+      // (stop() doesn't close it, only dispose() does, and nothing calls
+      // dispose() until the page itself is torn down) and re-paid the load
+      // cost on every single toggle.
+      if (!this.landmarker) {
+        onStatus({ kind: 'loading', message: 'Loading face model…' });
+        const fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
+        const options = (delegate: 'GPU' | 'CPU') => ({
+          baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+          runningMode: 'VIDEO' as const,
+          numFaces: 1,
+          outputFaceBlendshapes: true,
+          outputFacialTransformationMatrixes: true,
+        });
+        try {
+          this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('GPU'));
+        } catch (gpuErr) {
+          console.warn('[vision] GPU delegate failed, falling back to CPU:', gpuErr);
+          this.landmarker = await FaceLandmarker.createFromOptions(fileset, options('CPU'));
+        }
       }
 
       onStatus({ kind: 'ready' });

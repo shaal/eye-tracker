@@ -199,6 +199,10 @@ export class Heatmap {
   }
 
   clear(): void {
+    // Points queued via addPoint() but not yet drawn would otherwise survive
+    // the clear and paint on the very next animation frame, making a reset
+    // look like it silently failed.
+    this.pending = [];
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 

@@ -98,7 +98,11 @@ async function startLive(): Promise<void> {
     await vision.start(
       (features, tMs) => {
         latestFeatures = { features, tMs };
-        if (mode !== 'live' || !calibration) return;
+        // A lost face (blink, brief head turn, occlusion) still arrives as a
+        // frame — NO_FACE, ok: false — and predicting on it would feed a
+        // meaningless point into dwell/heatmap. calibration-ui.ts already
+        // gates sample collection on this; the live loop needs the same gate.
+        if (mode !== 'live' || !calibration || !features.ok) return;
 
         const showEye = tracking === 'eye' || tracking === 'combined';
         const showHead = tracking === 'head' || tracking === 'combined';
