@@ -36,10 +36,46 @@ macOS will ask for **Camera** access, and you must grant **Accessibility**
 moved. Without it, macOS silently ignores synthetic input and reports no error —
 the app detects this and shows a blocking banner rather than appearing to work.
 
+## Windows
+
+macOS is the primary target (ADR-0010); Windows is supported on the same
+commands and is where the `enigo` cursor backend is used instead of `CGEvent`.
+
+**Do not build from inside WSL2.** WSL2 has no webcam — `usbipd` can attach a
+USB device, but the stock WSL2 kernel is built without `CONFIG_USB_VIDEO_CLASS`,
+so `/dev/video*` never appears and `getUserMedia` fails with *Requested device
+not found*. Edit in WSL if you like, but build and run on the Windows side.
+
+Prerequisites, installed on Windows rather than in WSL:
+
+- **Node 20+**
+- **Rust** with the `x86_64-pc-windows-msvc` toolchain (the default from
+  `rustup` on Windows) and the **MSVC build tools** it links against —
+  Visual Studio Build Tools with the *Desktop development with C++* workload.
+
+Then, from PowerShell in a checkout **on the Windows filesystem** — building
+over `\\wsl.localhost\` works but is slow enough to be miserable:
+
+```powershell
+npm install
+npm run build
+npm run dev
+```
+
+Windows grants the camera in **Settings › Privacy & security › Camera**; the app
+reads the real status and says so rather than reporting a missing device. There
+is no Accessibility equivalent to grant. Note that Windows drops synthetic input
+aimed at windows running elevated, so gaze control will appear to do nothing
+over an admin console unless this app is elevated too — unlike macOS, nothing
+detects that for you.
+
+To produce an installer, `npm run package:win --workspace @eye-tracker/app`
+writes an NSIS installer and a portable `.exe` to `packages/app/release`.
+
 ## Try it without a camera
 
 ```bash
-npm run test:native              # 89 Rust unit tests: solver, filter, blink FSM, engine
+npm run test:native              # 183 Rust unit tests: solver, filter, blink FSM, engine
 npm run smoke:mouse              # report backend + permission + cursor position
 npm run smoke:mouse -- --move    # move the cursor in a square and put it back
 npm run smoke:mouse -- --click   # double-click where the cursor already is
@@ -52,9 +88,16 @@ selects the word. Two singles only move the caret.
 
 ## Kill switch
 
-**⌥⌘E** toggles cursor control from anywhere, whether or not the app has focus,
-and needs no pointer. Test it before you rely on gaze control. If the shortcut
-cannot be registered, the app refuses to enable control at all.
+**⌥⌘E** on macOS, **Alt+Ctrl+E** on Windows and Linux, toggles cursor control
+from anywhere, whether or not the app has focus, and needs no pointer. Test it
+before you rely on gaze control. If the shortcut cannot be registered, the app
+refuses to enable control at all.
+
+That last sentence is why the binding is per-platform: `Command` is a macOS-only
+modifier, so a `settings.json` carried across machines names a shortcut Windows
+cannot register, and control would fail closed forever with no in-app way to
+rebind it. A stale mac binding is detected and rewritten to the platform default
+on first launch.
 
 ## Your camera, your disk
 
