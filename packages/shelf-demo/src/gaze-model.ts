@@ -11,9 +11,11 @@
  * and a direct One Euro implementation. Good enough to show where someone is
  * looking; not the validated pipeline, and not claimed to be.
  *
- * The fit is written for an arbitrary feature count so the same code serves
- * eye-only (2 features), head-only (2 features), and combined (4 features)
- * models from one calibration pass.
+ * The fit is written for an arbitrary feature count, though this module only
+ * ever uses it at 2: eye-only (gx,gy) and head-only (hx,hy), fit from the same
+ * calibration pass. There's no fused eye+head model — a live comparison is
+ * more honest as two independent markers than one blended point, and a fused
+ * fit tends to collapse toward whichever signal has more variance anyway.
  */
 
 /** Solve an N×N linear system by Gaussian elimination with partial pivoting. */
@@ -153,7 +155,6 @@ interface CalibrationSample {
 export interface CalibrationResult {
   eye: GazeModel | null;
   head: GazeModel | null;
-  combined: GazeModel | null;
   /**
    * True when the head barely moved during calibration, which makes the
    * head-only model close to fitting noise — worth saying out loud rather
@@ -182,14 +183,12 @@ export class GazeCalibrator {
 
     const eyeFeatures = this.samples.map((s) => [s.gx, s.gy]);
     const headFeatures = this.samples.map((s) => [s.hx, s.hy]);
-    const combinedFeatures = this.samples.map((s) => [s.gx, s.gy, s.hx, s.hy]);
 
     const headSpread = (stddev(this.samples.map((s) => s.hx)) + stddev(this.samples.map((s) => s.hy))) / 2;
 
     return {
       eye: fitModel(eyeFeatures, targetX, targetY),
       head: fitModel(headFeatures, targetX, targetY),
-      combined: fitModel(combinedFeatures, targetX, targetY),
       headMotionTooSmall: headSpread < MIN_HEAD_SPREAD,
     };
   }

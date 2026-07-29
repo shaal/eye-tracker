@@ -53,6 +53,23 @@ function targetGrid(rect: DOMRect): Array<{ x: number; y: number }> {
 
 const MIN_QUALITY = 0.3;
 
+/**
+ * Deliberately NOT the production app's own instruction ("keep your head
+ * still") — that line exists there because the production app only ever
+ * calibrates eye tracking, and head motion is pure noise for that one job.
+ * This demo also fits a head-only model from the same samples, and that model
+ * needs *some* real head-position variance to fit anything at all. Telling
+ * people to hold still would suppress exactly the natural, incidental head
+ * motion (people unconsciously turn toward what they're looking at) that
+ * makes the head-only comparison possible — see
+ * `docs/plan/04-windows-port.md` / the session notes on `feat/shelf-demo` for
+ * the fuller reasoning. So the honest instruction is the middle ground: don't
+ * fight your natural posture, but don't perform head motion either.
+ */
+const INSTRUCTION_TEXT =
+  'Look at each dot with your eyes. Sit naturally — you don’t need to hold your head still, ' +
+  'but there’s no need to move it on purpose either.';
+
 export async function runCalibration(
   overlay: HTMLElement,
   shelfRect: DOMRect,
@@ -64,6 +81,10 @@ export async function runCalibration(
 
   overlay.hidden = false;
   overlay.innerHTML = '';
+  const instructions = document.createElement('p');
+  instructions.className = 'calibration-instructions';
+  instructions.textContent = INSTRUCTION_TEXT;
+  overlay.appendChild(instructions);
   const dot = document.createElement('div');
   dot.className = 'calibration-dot';
   overlay.appendChild(dot);
