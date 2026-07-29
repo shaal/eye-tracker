@@ -26,9 +26,25 @@ export interface Settings {
   recordingCapBytes: number;
 }
 
+/**
+ * The kill switch must be reachable without a pointer, so it has to be a
+ * *global* accelerator that nothing else is likely to claim.
+ *
+ * It cannot be one string across platforms. Electron's `Command` modifier only
+ * exists on macOS; on Windows and Linux `globalShortcut.register` rejects it.
+ * That is not a cosmetic failure — registration failing makes the app refuse to
+ * enable cursor control at all (ADR-0011), so a mac-only default means a
+ * Windows user can never enable control and has no in-app way to fix it.
+ *
+ * `CommandOrControl` would be the terse spelling, but it is written out per
+ * platform so the string stored in `settings.json` is the one the user sees in
+ * the UI and in the "could not register" error.
+ */
+export const DEFAULT_SHORTCUT = process.platform === 'darwin' ? 'Alt+Command+E' : 'Alt+Control+E';
+
 const DEFAULTS: Settings = {
   tuning: {},
-  shortcut: 'Alt+Command+E',
+  shortcut: DEFAULT_SHORTCUT,
   showRawGaze: false,
   overlayVisible: true,
   calibrationPoints: 9,

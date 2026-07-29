@@ -679,6 +679,85 @@ pub fn mouse_backend_name() -> Result<String> {
     Ok(backend()?.name().to_string())
 }
 
+/// One display in both the logical (DIP) and physical pixel spaces.
+///
+/// `physicalX`/`physicalY` are the display's top-left in the platform's
+/// physical virtual-screen space — Electron's `screen.dipToScreenPoint()` of
+/// the same corner. It is *not* the logical origin times the scale factor;
+/// displays left of or above the primary have origins that scale independently.
+#[napi(object)]
+pub struct DisplayGeometryJs {
+    pub dip_x: f64,
+    pub dip_y: f64,
+    pub dip_width: f64,
+    pub dip_height: f64,
+    pub physical_x: f64,
+    pub physical_y: f64,
+    /// Physical pixels per DIP — Electron's `Display.scaleFactor`.
+    pub scale: f64,
+}
+
+impl From<&DisplayGeometryJs> for mouse::geometry::DisplayGeometry {
+    fn from(d: &DisplayGeometryJs) -> Self {
+        Self {
+            dip_x: d.dip_x,
+            dip_y: d.dip_y,
+            dip_width: d.dip_width,
+            dip_height: d.dip_height,
+            physical_x: d.physical_x,
+            physical_y: d.physical_y,
+            scale: d.scale,
+        }
+    }
+}
+
+/// A calibration run's intake, for explaining why it collected what it did.
+#[napi(object)]
+pub struct CalibrationDiagnosticsJs {
+    /// Frames that reached the engine, counted before any gate.
+    pub frames_seen: u32,
+    /// Of those, how many were dropped as out-of-order.
+    pub frames_stale: u32,
+    pub accepted: u32,
+    pub rejected_no_face: u32,
+    pub rejected_blinking: u32,
+    pub rejected_low_quality: u32,
+    pub rejected_unknown_target: u32,
+    /// A ready-made sentence naming the likeliest cause, or null when samples
+    /// were collected normally.
+    pub explanation: Option<String>,
+}
+
+impl From<eye_tracker_core::engine::CalibrationDiagnostics> for CalibrationDiagnosticsJs {
+    fn from(d: eye_tracker_core::engine::CalibrationDiagnostics) -> Self {
+        Self {
+            frames_seen: d.frames_seen as u32,
+            frames_stale: d.frames_stale as u32,
+            accepted: d.accepted as u32,
+            rejected_no_face: d.rejections.no_face as u32,
+            rejected_blinking: d.rejections.blinking as u32,
+            rejected_low_quality: d.rejections.low_quality as u32,
+            rejected_unknown_target: d.rejections.unknown_target as u32,
+            explanation: d.explain(),
+        }
+    }
+}
+
+/// Teach the cursor backend how logical coordinates map to physical ones.
+///
+/// Only the Windows/Linux `enigo` backend needs this; macOS's `CGEvent` API
+/// already speaks the logical space the engine uses, and ignores it.
+///
+/// Process-wide on purpose: the engine holds one backend and the debug-panel
+/// helpers build a throwaway per call, and a monitor being plugged in has to
+/// reach both. Call it at startup and on every display change — until it is
+/// called the mapping is the identity, which is correct only where every
+/// display sits at 100% scaling.
+#[napi]
+pub fn set_display_geometry(displays: Vec<DisplayGeometryJs>) {
+    mouse::geometry::set_displays(displays.iter().map(Into::into).collect());
+}
+
 /// Standard calibration target layout for a work area (ADR-0006).
 #[napi]
 pub fn calibration_targets(bounds: ScreenBounds, points: u32) -> Vec<Point> {
@@ -774,6 +853,17 @@ impl Engine {
     #[napi]
     pub fn calibration_progress(&self, target_index: u32) -> u32 {
         self.inner.calibration_progress(target_index as usize) as u32
+    }
+
+    /// Why the last (or current) calibration run collected what it did.
+    ///
+    /// `framesSeen` counts pushes that reached the engine before any gate, so
+    /// zero there means the renderer sent nothing and no threshold here is at
+    /// fault. `explanation` is a ready-made sentence, or null when samples were
+    /// collected normally and the failure lies elsewhere.
+    #[napi]
+    pub fn calibration_diagnostics(&self) -> CalibrationDiagnosticsJs {
+        self.inner.calibration_diagnostics().into()
     }
 
     #[napi]

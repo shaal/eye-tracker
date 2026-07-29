@@ -1,36 +1,31 @@
 //! Windows / Linux mouse backend via `enigo`.
 //!
-//! **Written but unverified** — ADR-0010 treats these as a starting point, not
-//! a supported target. Two known fidelity gaps versus the macOS backend:
+//! ADR-0010 treats this as a secondary target behind macOS. One fidelity gap
+//! versus the mac backend remains:
 //!
 //! - Double-click is emulated as two clicks rather than a single event carrying
 //!   a click-count, so applications that inspect click state may not recognize
 //!   it as a double-click.
-//! - `enigo` works in physical pixels while the engine works in logical (DIP)
-//!   pixels, so the caller must supply a scale factor. Left at 1.0 this is
-//!   correct only on non-scaled displays.
+//!
+//! The other gap — `enigo` working in physical pixels while the engine works in
+//! logical (DIP) pixels — is handled by [`super::geometry`], which the app
+//! populates from Electron's `screen` module. Until it does, the mapping is the
+//! identity, so an unscaled single-display setup is correct either way.
 
 use enigo::{Button as EnigoButton, Coordinate, Direction, Enigo, Mouse, Settings};
 
+use super::geometry::{dip_to_physical, physical_to_dip, with_displays};
 use super::{Button, MouseBackend, MouseError};
 
 pub struct EnigoMouse {
     enigo: Enigo,
-    /// Logical → physical pixel ratio. See the module note.
-    scale: f64,
 }
 
 impl EnigoMouse {
     pub fn new() -> Result<Self, MouseError> {
         let enigo = Enigo::new(&Settings::default())
             .map_err(|e| MouseError::Backend(format!("enigo init failed: {e}")))?;
-        Ok(Self { enigo, scale: 1.0 })
-    }
-
-    pub fn set_scale(&mut self, scale: f64) {
-        if scale.is_finite() && scale > 0.0 {
-            self.scale = scale;
-        }
+        Ok(Self { enigo })
     }
 }
 
@@ -44,8 +39,9 @@ fn map_button(b: Button) -> EnigoButton {
 
 impl MouseBackend for EnigoMouse {
     fn move_to(&mut self, x: f64, y: f64) -> Result<(), MouseError> {
-        let px = (x * self.scale).round() as i32;
-        let py = (y * self.scale).round() as i32;
+        let (fx, fy) = with_displays(|d| dip_to_physical(d, x, y));
+        let px = fx.round() as i32;
+        let py = fy.round() as i32;
         self.enigo
             .move_mouse(px, py, Coordinate::Abs)
             .map_err(|e| MouseError::Backend(format!("move_mouse failed: {e}")))
@@ -66,7 +62,7 @@ impl MouseBackend for EnigoMouse {
             .enigo
             .location()
             .map_err(|e| MouseError::Backend(format!("location failed: {e}")))?;
-        Ok((f64::from(x) / self.scale, f64::from(y) / self.scale))
+        Ok(with_displays(|d| physical_to_dip(d, f64::from(x), f64::from(y))))
     }
 
     fn name(&self) -> &'static str {

@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  CALIBRATION_SAMPLING,
   CALIBRATION_TIMING,
   FIXATION_INSTRUCTION,
   HEAD_MOTION_STEPS,
@@ -97,4 +98,48 @@ test('the quoted duration counts the cards but not duplicates', () => {
 
 test('an empty run quotes no instruction time', () => {
   assert.equal(totalDurationMs(0, 0), 0);
+});
+
+test('the wanted sample count matches what the timed protocol gave at 30 fps', () => {
+  // The count is a restatement of the original intent, not a new target: the
+  // old fixed window yielded this many samples on a camera that kept up. If
+  // someone retunes the window, this should be revisited together with it.
+  const usableMs = CALIBRATION_TIMING.collectMs - CALIBRATION_TIMING.discardMs;
+  const atThirtyFps = Math.round((usableMs / 1000) * 30);
+  assert.equal(
+    CALIBRATION_SAMPLING.targetSamples,
+    atThirtyFps,
+    'sample target drifted away from the timing it was derived from',
+  );
+});
+
+test('a starved camera still terminates, and a fast one still gets a full fixation', () => {
+  const usableMs = CALIBRATION_TIMING.collectMs - CALIBRATION_TIMING.discardMs;
+
+  // The ceiling has to exceed the nominal window, or the count could never be
+  // reached and the change would be a no-op that merely renamed a timeout.
+  assert.ok(
+    CALIBRATION_SAMPLING.maxCollectMs > usableMs,
+    'the ceiling must leave room for a slow camera to catch up',
+  );
+
+  // ...and it has to be bounded, or a dead camera hangs the run forever.
+  assert.ok(CALIBRATION_SAMPLING.maxCollectMs <= 5000, 'ceiling is too loose to be a safety net');
+
+  // Polling has to be fine-grained relative to the window, or the count
+  // overshoots and the dots drag.
+  assert.ok(
+    CALIBRATION_SAMPLING.pollMs < usableMs / 4,
+    'poll interval is coarse enough to overshoot the sample target noticeably',
+  );
+});
+
+test('the worst-case run is bounded by the ceiling, not unbounded', () => {
+  // What a user is exposed to if the camera is starved at every dot.
+  const worstPerDot =
+    CALIBRATION_TIMING.settleMs +
+    CALIBRATION_TIMING.discardMs +
+    CALIBRATION_SAMPLING.maxCollectMs +
+    CALIBRATION_TIMING.gapMs;
+  assert.ok(worstPerDot < 4000, `a starved dot would take ${worstPerDot}ms, which reads as a hang`);
 });

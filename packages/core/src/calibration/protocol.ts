@@ -18,8 +18,44 @@ export const CALIBRATION_TIMING = {
 } as const;
 
 /**
+ * How many samples a fixation target should gather before moving on.
+ *
+ * A fixed *time* window silently makes the fit's quality a function of the
+ * camera's frame rate. The 500 ms of usable window above was authored against
+ * 30 fps — about 15 samples per dot. A 1080p webcam whose inference costs 30 ms
+ * runs at ~15 fps and yields half that, and the first real session measured
+ * exactly this: 175 samples where the protocol intends ~400, about 8 per dot.
+ *
+ * The fit does not fail loudly at that point, which is the trap. Ridge
+ * regression cross-validates its way to a very large λ, shrinks toward the
+ * mean, and returns a model that spans ~60% of the vertical range it was shown
+ * — a systematic error the user is then told to fix by recalibrating, which
+ * reproduces it.
+ *
+ * So the target is a sample count, and time becomes the safety net rather than
+ * the mechanism.
+ */
+export const CALIBRATION_SAMPLING = {
+  /** Samples wanted per fixation target — what 30 fps × 500 ms used to give. */
+  targetSamples: 15,
+  /**
+   * Give up waiting after this long regardless. Without a ceiling a camera
+   * that stops delivering frames would hang the run forever instead of
+   * finishing and reporting a starved fit.
+   */
+  maxCollectMs: 2000,
+  /** How often to check the count while collecting. */
+  pollMs: 50,
+} as const;
+
+/**
  * Head-motion targets run longer, because the user is sweeping their head
  * through a range rather than holding a single pose (ADR-0015).
+ *
+ * These stay purely time-driven on purpose. The duration *is* the instruction —
+ * the user is sweeping through a range of poses, and cutting the window short
+ * once enough samples arrived would truncate the sweep and collect a narrower
+ * range of head positions, which is the opposite of the point.
  */
 export const HEAD_MOTION_TIMING = {
   settleMs: 800,
