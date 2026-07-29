@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shelf gaze demo</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Where customers look on the shelf</h1>
+      <div class="mode-toggle" role="group" aria-label="Data source">
+        <button id="mode-live" class="mode-btn" type="button" aria-pressed="true">Live camera</button>
+        <button id="mode-replay" class="mode-btn" type="button" aria-pressed="false">Replay demo</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <div class="shelf-pane">
+        <div id="shelf" class="shelf"></div>
+        <canvas id="heatmap" class="heatmap"></canvas>
+        <div id="marker-eye" class="gaze-marker gaze-marker--eye" hidden></div>
+        <div id="marker-head" class="gaze-marker gaze-marker--head" hidden></div>
+        <div id="calibration-overlay" class="calibration-overlay" hidden></div>
+      </div>
+
+      <aside class="side-panel">
+        <div class="status-card">
+          <p id="status-line" class="status-line">Starting…</p>
+          <button id="calibrate-btn" type="button" class="calibrate-btn">Calibrate</button>
+          <div id="tracking-toggle" class="tracking-toggle" role="group" aria-label="Tracking signal" hidden>
+            <button id="track-eye" class="track-btn" type="button" aria-pressed="true">Eyes</button>
+            <button id="track-head" class="track-btn" type="button" aria-pressed="false">Head</button>
+            <button id="track-combined" class="track-btn" type="button" aria-pressed="false">Combined</button>
+          </div>
+          <p id="combined-legend" class="combined-legend" hidden>
+            <span class="legend-swatch legend-swatch--eye"></span>eyes (drives the stats)
+            <span class="legend-swatch legend-swatch--head"></span>head (visual only)
+          </p>
+        </div>
+        <div class="stats-card">
+          <div class="stats-header">
+            <h2>Gaze time by product</h2>
+            <button id="reset-stats-btn" type="button" class="reset-stats-btn">Reset</button>
+          </div>
+          <ol id="stats-list" class="stats-list"></ol>
+        </div>
+      </aside>
+    </main>
+
+    <video id="camera" class="camera-source" autoplay playsinline muted></video>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -10,7 +10,8 @@
   "workspaces": [
     "packages/core",
     "packages/native",
-    "packages/app"
+    "packages/app",
+    "packages/shelf-demo"
   ],
   "scripts": {
     "postinstall": "npm run fetch-models",
@@ -20,6 +21,8 @@
     "build:app": "npm run build --workspace @eye-tracker/app",
     "build": "npm run build:native && npm run build:core && npm run build:app",
     "dev": "npm run build:native && npm run build:core && npm run dev --workspace @eye-tracker/app",
+    "dev:shelf-demo": "npm run build:core && npm run dev --workspace @eye-tracker/shelf-demo",
+    "build:shelf-demo": "npm run build:core && npm run build --workspace @eye-tracker/shelf-demo",
     "start": "npm run dev",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test:native && npm run test:core",
