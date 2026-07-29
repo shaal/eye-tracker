@@ -1,0 +1,15 @@
+{
+  // Browser environment, deliberately without @types/node — this package
+  // never runs in Node beyond the Vite dev server (ADR-0002's reasoning,
+  // applied here even though there's no Electron sandbox to enforce it).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
