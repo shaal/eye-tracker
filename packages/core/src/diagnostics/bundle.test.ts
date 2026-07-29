@@ -468,6 +468,150 @@ test('a run with too few scored points says so instead of inventing a pattern', 
 });
 
 // ---------------------------------------------------------------------------
+// Axis collapse (#58) — a dead channel is not a displaced one
+// ---------------------------------------------------------------------------
+
+/**
+ * One axis collapsed to a near-constant prediction, the other functional.
+ * The collapsing axis's target/predicted pairs are #57's measured row means
+ * from the real session that #58 was filed against — predicted y stayed in
+ * 369-393 while target y swept 239-1090. The live axis has no published
+ * per-point data (the issue reports only that horizontal "recovered"), so it
+ * is a representative small residual, kept well clear of a -1 slope.
+ */
+function axisCollapseRun(collapseAxis: 'x' | 'y') {
+  const grid: Array<[number, number]> = [
+    [0.5, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.8],
+    [0.5, 0.18],
+    [0.35, 0.65],
+    [0.82, 0.5],
+    [0.2, 0.8],
+    [0.65, 0.35],
+    [0.5, 0.82],
+    [0.8, 0.2],
+    [0.35, 0.35],
+    [0.18, 0.5],
+    [0.65, 0.65],
+  ];
+  const predicted: Record<string, number> = {
+    '0.18': 369,
+    '0.2': 374,
+    '0.35': 376,
+    '0.5': 380,
+    '0.65': 391,
+    '0.8': 378,
+    '0.82': 393,
+  };
+  return grid.map(([fx, fy]) => {
+    const collapseFrac = collapseAxis === 'y' ? fy : fx;
+    const liveFrac = collapseAxis === 'y' ? fx : fy;
+    const collapsePos = 1329 * collapseFrac;
+    const livePos = 1512 * liveFrac;
+    const collapseBias = (predicted[String(collapseFrac)] ?? 380) - collapsePos;
+    const liveBias = -12 + 0.02 * (livePos - 756);
+    const target =
+      collapseAxis === 'y' ? { x: livePos, y: collapsePos } : { x: collapsePos, y: livePos };
+    const bias =
+      collapseAxis === 'y' ? { x: liveBias, y: collapseBias } : { x: collapseBias, y: liveBias };
+    return cloud(target, bias, 10);
+  });
+}
+
+test('the #58 session classifies the collapsed vertical axis as a collapse, not a uniform offset', () => {
+  const pattern = describeBiasPattern(summarizeValidation(axisCollapseRun('y'), PX_PER_DEG).targets);
+  assert.match(pattern, /y axis has collapsed/);
+  assert.doesNotMatch(pattern, /uniform offset/);
+  assert.doesNotMatch(pattern, /recalibrat/i);
+});
+
+test('the other axis is reported as not collapsed, independently, per axis', () => {
+  const pattern = describeBiasPattern(summarizeValidation(axisCollapseRun('y'), PX_PER_DEG).targets);
+  assert.match(pattern, /y axis has collapsed/);
+  assert.match(pattern, /x axis is not collapsed/);
+});
+
+test('axis collapse is detected on x symmetrically with y', () => {
+  const pattern = describeBiasPattern(summarizeValidation(axisCollapseRun('x'), PX_PER_DEG).targets);
+  assert.match(pattern, /x axis has collapsed/);
+  assert.match(pattern, /y axis is not collapsed/);
+  assert.doesNotMatch(pattern, /recalibrat/i);
+});
+
+test('a genuine uniform offset is unaffected by the collapse check', () => {
+  // Regression guard for #58's own fix: the synthetic uniform-offset fixture
+  // above has near-zero bias/target slope on both axes, so it must keep
+  // classifying as a uniform offset rather than tripping the new check.
+  const pattern = describeBiasPattern(summarizeValidation(uniformOffsetRun(), PX_PER_DEG).targets);
+  assert.doesNotMatch(pattern, /collapsed/);
+  assert.match(pattern, /uniform offset/);
+});
+
+/**
+ * Same vertical collapse as #58, but the live horizontal axis carries a
+ * material offset of its own (a constant ~150 px, not proportional to
+ * position) rather than a small residual. This is the case CodeRabbit flagged
+ * on PR #61: "not collapsed" is not the same claim as "healthy", and the
+ * pattern text must not call a badly-offset live axis normal just because its
+ * slope isn't near -1.
+ */
+function axisCollapseWithLiveOffsetRun() {
+  const grid: Array<[number, number]> = [
+    [0.5, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.8],
+    [0.5, 0.18],
+    [0.35, 0.65],
+    [0.82, 0.5],
+    [0.2, 0.8],
+    [0.65, 0.35],
+    [0.5, 0.82],
+    [0.8, 0.2],
+    [0.35, 0.35],
+    [0.18, 0.5],
+    [0.65, 0.65],
+  ];
+  const predictedY: Record<string, number> = {
+    '0.18': 369,
+    '0.2': 374,
+    '0.35': 376,
+    '0.5': 380,
+    '0.65': 391,
+    '0.8': 378,
+    '0.82': 393,
+  };
+  return grid.map(([fx, fy]) => {
+    const target = { x: 1512 * fx, y: 1329 * fy };
+    const key = String(fy);
+    const predicted = predictedY[key];
+    // A missing entry must fail the test loudly rather than quietly fitting a
+    // wrong-but-plausible y — `?? 380` would let the grid drift out of step
+    // with this table without the test ever noticing.
+    assert.ok(predicted !== undefined, `no predicted-y fixture entry for fy=${key}`);
+    const biasY = predicted - target.y;
+    const biasX = -150 + (fx > 0.5 ? 6 : -6);
+    return cloud(target, { x: biasX, y: biasY }, 10);
+  });
+}
+
+test('a live axis with its own material offset is never called healthy just because it is not collapsed', () => {
+  const report = summarizeValidation(axisCollapseWithLiveOffsetRun(), PX_PER_DEG);
+
+  // The fixture's whole point is a large x offset alongside the y collapse —
+  // confirm that offset is actually there before trusting what the pattern
+  // text says about it.
+  const meanBiasX = report.targets.reduce((s, t) => s + t.bias.x, 0) / report.targets.length;
+  assert.ok(Math.abs(meanBiasX) > 100, `expected a material x bias, got ${meanBiasX}`);
+
+  const pattern = describeBiasPattern(report.targets);
+  assert.match(pattern, /y axis has collapsed/);
+  assert.doesNotMatch(pattern, /tracking normally/);
+  assert.doesNotMatch(pattern, /healthy/);
+  assert.match(pattern, /x axis is not collapsed/);
+});
+
+// ---------------------------------------------------------------------------
 // Shape and summary
 // ---------------------------------------------------------------------------
 

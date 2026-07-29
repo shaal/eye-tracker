@@ -439,6 +439,46 @@ export function biasDirection(bias: Point): string {
 }
 
 /**
+ * Least-squares slope of bias against target position, on one axis.
+ *
+ * This is the number that tells a uniform offset apart from a collapsed
+ * channel, and the uniformity check below cannot see it: both put every arrow
+ * pointing the same way, so a field whose bias grows steadily from +130 to
+ * -697 "agrees in direction" exactly as much as one that is genuinely
+ * `ŷ = y + c` (see #58). Regressing bias on target settles it —
+ *
+ * - **uniform offset:** `ŷ = y + c` ⇒ `bias = ŷ - y = c`, slope ≈ 0
+ * - **collapse:** `ŷ ≈ c` ⇒ `bias = c - y`, slope ≈ -1
+ */
+function axisSlope(targets: readonly ValidationTargetResult[], axis: 'x' | 'y'): number {
+  const n = targets.length;
+  const meanT = targets.reduce((s, t) => s + t.target[axis], 0) / n;
+  const meanB = targets.reduce((s, t) => s + t.bias[axis], 0) / n;
+  let num = 0;
+  let den = 0;
+  for (const t of targets) {
+    const dt = t.target[axis] - meanT;
+    num += dt * (t.bias[axis] - meanB);
+    den += dt * dt;
+  }
+  // No spread of targets on this axis to regress against — nothing to say.
+  return den > 1 ? num / den : 0;
+}
+
+/**
+ * How close a slope has to be to -1 to call the axis collapsed. Wide enough to
+ * cover the recorded session (-0.97) with room to spare, tight enough that the
+ * synthetic uniform-offset fixture (slope ~0) is nowhere near it — the only
+ * two data points available, per ADR-0018's own caution against tuning
+ * thresholds beyond what real sessions justify.
+ */
+const COLLAPSE_SLOPE_TOLERANCE = 0.3;
+
+function isCollapsedSlope(slope: number): boolean {
+  return Math.abs(slope + 1) < COLLAPSE_SLOPE_TOLERANCE;
+}
+
+/**
  * Name the shape the arrows make.
  *
  * `debug/validation-view.ts` documents four readings of the error map, each
@@ -505,6 +545,30 @@ export function describeBiasPattern(targets: readonly ValidationTargetResult[]):
       'one point is far worse than the rest while the others are consistent — usually a ' +
       'calibration dot that was never properly fixated, not a model problem'
     );
+  }
+
+  // Collapse, checked before uniformity so a dead channel is never read as a
+  // displaced one: both put every arrow pointing roughly the same way, and only
+  // the bias/target slope tells them apart (#58). Checked per axis — a camera
+  // mounted above the screen folds vertical without touching horizontal, so a
+  // whole-field verdict cannot say "x is fine, y is dead" (#57).
+  const slopeX = axisSlope(targets, 'x');
+  const slopeY = axisSlope(targets, 'y');
+  const collapsedX = isCollapsedSlope(slopeX);
+  const collapsedY = isCollapsedSlope(slopeY);
+  if (collapsedX || collapsedY) {
+    const describe = (axis: 'x' | 'y', slope: number) =>
+      `the ${axis} axis has collapsed — predicted ${axis} stays almost flat while targets ` +
+      `sweep their full range (slope ${slope.toFixed(2)}); this is a dead channel, not a ` +
+      `displaced one, and no calibration pose fixes a channel that never moved. Check the eye ` +
+      `zoom and resolvable-step diagnostics for ${axis} instead`;
+    if (collapsedX && collapsedY) return `${describe('x', slopeX)}. ${describe('y', slopeY)}.`;
+    const [dead, deadSlope, live] = collapsedX ? (['x', slopeX, 'y'] as const) : (['y', slopeY, 'x'] as const);
+    // The slope test only rules out collapse — it says nothing about whether
+    // the other axis is otherwise accurate, so it cannot be called "normal" or
+    // "healthy" here. A live axis can still carry its own uniform offset or
+    // gain error; that is a separate diagnosis this function does not make.
+    return `${describe(dead, deadSlope)}. The ${live} axis is not collapsed — this is a per-axis failure, not a whole-field one.`;
   }
 
   if (uniformity > 0.7) {
