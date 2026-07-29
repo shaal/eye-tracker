@@ -74,15 +74,23 @@ export function currentFingerprint(): string {
  * with to within a few percent instead of being half of it.
  *
  * A non-Retina external monitor (~81 PPI at `scaleFactor` 1) is over-estimated
- * by this constant. That is accepted: macOS is the supported target (ADR-0010),
- * Retina is the case that matters, and the honest fix is to measure the display
- * rather than to pick a second constant.
+ * by this constant. That is accepted on macOS: Retina is the case that matters,
+ * and the honest fix is to measure the display rather than to pick a second
+ * constant.
+ *
+ * Windows is not the same case and does need its own number. A DIP there is
+ * *defined* as 1/96 inch, and the scaling percentages Windows recommends are
+ * chosen to hold that: a 96 DIP/inch display at 100%, a 144-PPI panel at 150%,
+ * and so on all land near 96. Using 110 would over-report error by ~15% on
+ * every Windows machine — in the pessimistic direction, but wrong, and wrong in
+ * a figure whose whole job is to tell the user whether to keep going.
  */
+const ASSUMED_DIP_PER_INCH = process.platform === 'win32' ? 96 : 110;
+
 export function estimatePxPerDegree(assumedViewingDistanceMm = 600): number {
   // Already device-independent: DIP per inch, NOT physical PPI. Do not divide
   // by `scaleFactor` — the coordinates this converts are themselves in DIP.
-  const assumedDipPerInch = 110;
-  const pxPerMm = assumedDipPerInch / 25.4;
+  const pxPerMm = ASSUMED_DIP_PER_INCH / 25.4;
   const mmPerDegree = assumedViewingDistanceMm * Math.tan((1 * Math.PI) / 180);
   return Math.max(1, pxPerMm * mmPerDegree);
 }

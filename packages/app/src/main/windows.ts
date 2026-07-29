@@ -53,6 +53,13 @@ export function createControlWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
       webSecurity: true,
+      // This window owns the camera loop, and the calibration overlay covers it
+      // completely the moment a run starts. Chromium treats a fully-occluded
+      // window as backgrounded and stops servicing its rendering steps — which
+      // is what drives `requestVideoFrameCallback`. The result was a run that
+      // collected exactly one frame and then nothing, with the overlay
+      // advancing on its own timers as though all were well.
+      backgroundThrottling: false,
     },
   });
 
@@ -104,6 +111,9 @@ export function createOverlayWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // The overlay draws the calibration dot and the crosshair; throttling it
+      // would stutter the very thing the user is asked to fixate.
+      backgroundThrottling: false,
     },
   });
 

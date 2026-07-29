@@ -16,7 +16,7 @@ import {
   type FrameWritePayload,
   type StartRecordingRequest,
 } from './recordings.js';
-import { loadSettings, saveSettings, type Settings } from './settings.js';
+import { DEFAULT_SHORTCUT, loadSettings, saveSettings, type Settings } from './settings.js';
 import { createControlWindow, createOverlayWindow, resizeOverlay } from './windows.js';
 
 /** HUD text gains nothing from 60 Hz updates; the crosshair needs every frame. */
@@ -25,6 +25,25 @@ const HUD_INTERVAL_MS = 50;
 let controlWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let bridge: EngineBridge | null = null;
+
+// Before `loadSettings()`, not inside `whenReady`. `app.getPath('userData')`
+// derives from the app name, so setting it late meant settings, profiles and
+// recordings were written under the package name while scripts/recordings.mjs
+// and scripts/diagnostics.mjs looked under "Eye Tracker" — the directory the
+// packaged build uses. The two never agreed outside a packaged app.
+app.setName('Eye Tracker');
+
+// Must precede `whenReady`; Chromium reads these once at startup.
+//
+// `backgroundThrottling: false` on the window covers timers, but not Chromium's
+// *occlusion* path: a window judged fully covered stops being rendered at all,
+// and on Windows the calibration overlay covers the control window exactly.
+// That killed the camera loop for the duration of every run — the one thing
+// that must keep running while the overlay is up.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 let settings: Settings = loadSettings();
 let shortcutRegistered = false;
 let lastHudAt = 0;
@@ -119,23 +138,46 @@ function registerShortcut(): void {
   // stale "already active".
   cancelKeysActive = false;
   skipKeysActive = false;
-  try {
-    shortcutRegistered = globalShortcut.register(settings.shortcut, () => {
-      const next = !(bridge?.controlEnabled ?? false);
-      const ok = bridge?.setControlEnabled(next) ?? false;
-      if (!ok && next) {
-        // Surface *why* it refused rather than silently doing nothing.
-        send(controlWindow, 'app:notice', {
-          level: 'warn',
-          message: !native.checkAccessibilityPermission(false)
-            ? 'Accessibility permission is required before control can be enabled.'
-            : 'Calibrate before enabling control.',
-        });
-      }
-      pushStatus(true);
-    });
-  } catch (err) {
-    console.error('[shortcut] registration threw:', err);
+  const toggleControl = (): void => {
+    const next = !(bridge?.controlEnabled ?? false);
+    const ok = bridge?.setControlEnabled(next) ?? false;
+    if (!ok && next) {
+      // Surface *why* it refused rather than silently doing nothing.
+      send(controlWindow, 'app:notice', {
+        level: 'warn',
+        message: !native.checkAccessibilityPermission(false)
+          ? 'Accessibility permission is required before control can be enabled.'
+          : 'Calibrate before enabling control.',
+      });
+    }
+    pushStatus(true);
+  };
+
+  const tryRegister = (accelerator: string): boolean => {
+    try {
+      return globalShortcut.register(accelerator, toggleControl);
+    } catch (err) {
+      console.error(`[shortcut] registering "${accelerator}" threw:`, err);
+      return false;
+    }
+  };
+
+  shortcutRegistered = tryRegister(settings.shortcut);
+
+  // A settings.json written on macOS holds `Alt+Command+E`, which no Windows or
+  // Linux build can register. Without this fallback that stale string is fatal:
+  // control fails closed below, and the only way to rebind is to hand-edit the
+  // file, which the user has no reason to suspect.
+  if (!shortcutRegistered && settings.shortcut !== DEFAULT_SHORTCUT) {
+    console.warn(
+      `[shortcut] "${settings.shortcut}" is not registrable on ${process.platform}; ` +
+        `falling back to "${DEFAULT_SHORTCUT}"`,
+    );
+    if (tryRegister(DEFAULT_SHORTCUT)) {
+      shortcutRegistered = true;
+      settings = { ...settings, shortcut: DEFAULT_SHORTCUT };
+      saveSettings(settings);
+    }
   }
 
   if (!shortcutRegistered) {
@@ -335,11 +377,28 @@ function wireIpc(): void {
   });
 
   ipcMain.handle('permissions:camera', async () => {
-    if (process.platform !== 'darwin') return 'granted';
-    const status = systemPreferences.getMediaAccessStatus('camera');
-    if (status === 'granted') return 'granted';
-    const granted = await systemPreferences.askForMediaAccess('camera');
-    return granted ? 'granted' : 'denied';
+    if (process.platform === 'darwin') {
+      const status = systemPreferences.getMediaAccessStatus('camera');
+      if (status === 'granted') return 'granted';
+      const granted = await systemPreferences.askForMediaAccess('camera');
+      return granted ? 'granted' : 'denied';
+    }
+
+    // Windows supports `getMediaAccessStatus` but not `askForMediaAccess` —
+    // there is no prompt API, the user grants the camera in Settings › Privacy
+    // & security › Camera. Reporting the real status matters: returning a
+    // blanket "granted" meant a privacy-blocked camera surfaced only as an
+    // opaque `getUserMedia` failure that reads as "no camera attached".
+    //
+    // `not-determined` is reported as granted deliberately — it means the OS
+    // has not decided yet, and the honest way to find out is to let
+    // `getUserMedia` ask.
+    if (process.platform === 'win32') {
+      const status = systemPreferences.getMediaAccessStatus('camera');
+      return status === 'denied' || status === 'restricted' ? 'denied' : 'granted';
+    }
+
+    return 'granted';
   });
 
   ipcMain.handle('permissions:accessibility', (_e, prompt: boolean) =>
@@ -347,6 +406,15 @@ function wireIpc(): void {
   );
 
   ipcMain.handle('permissions:openSettings', async () => {
+    // Windows has no Accessibility authorization for synthetic input, so the
+    // useful destination there is the camera privacy page — the one permission
+    // that can actually block this app. Handing the mac URI to Windows just
+    // raised a "how do you want to open this file?" dialog.
+    if (process.platform === 'win32') {
+      await shell.openExternal('ms-settings:privacy-webcam');
+      return;
+    }
+    if (process.platform !== 'darwin') return;
     await shell.openExternal(
       'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
     );
@@ -571,8 +639,50 @@ function mergeTuning(base: TuningPatch, patch: TuningPatch): TuningPatch {
   };
 }
 
+/**
+ * Hand the native cursor backend the logical→physical pixel mapping.
+ *
+ * The engine emits DIP coordinates; `enigo` (Windows/Linux) posts physical
+ * ones. Windows scales per monitor, so this is a table rather than a number —
+ * a 150% laptop panel next to a 100% external monitor has no single ratio, and
+ * the second display's physical origin is not its logical origin scaled.
+ *
+ * `dipToScreenPoint` is the only thing that knows both spaces, which is why the
+ * table is built here and not in Rust.
+ *
+ * Windows only, deliberately. macOS has no `dipToScreenPoint` and needs none —
+ * `CGEvent` already speaks DIP. Linux has the API but Electron does not support
+ * it under Wayland, where it returns the point unchanged; publishing a table
+ * built from that would scale coordinates that were never converted, which is
+ * worse than the identity mapping Linux has always used.
+ */
+function pushDisplayGeometry(): void {
+  if (process.platform !== 'win32') return;
+  try {
+    native.setDisplayGeometry(
+      screen.getAllDisplays().map((d) => {
+        const origin = screen.dipToScreenPoint({ x: d.bounds.x, y: d.bounds.y });
+        return {
+          dipX: d.bounds.x,
+          dipY: d.bounds.y,
+          dipWidth: d.bounds.width,
+          dipHeight: d.bounds.height,
+          physicalX: origin.x,
+          physicalY: origin.y,
+          scale: d.scaleFactor,
+        };
+      }),
+    );
+  } catch (err) {
+    // Leaves the mapping as the identity, which is correct at 100% scaling and
+    // merely offset elsewhere. Not worth blocking startup over.
+    console.error('[displays] could not publish display geometry:', err);
+  }
+}
+
 app.whenReady().then(() => {
-  app.setName('Eye Tracker');
+  // Before the engine exists, so the very first cursor move is already mapped.
+  pushDisplayGeometry();
 
   try {
     bridge = new EngineBridge(settings.tuning);
@@ -621,6 +731,9 @@ app.whenReady().then(() => {
 
   // A display change invalidates a pixel-space calibration (ADR-0011).
   const onDisplayChange = () => {
+    // First: a resolution or scaling change makes the old mapping wrong, and
+    // everything below this line can move the cursor.
+    pushDisplayGeometry();
     bridge?.handleDisplayChange();
     resizeOverlay(overlayWindow);
     pushStatus(true);
