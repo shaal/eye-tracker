@@ -36,6 +36,28 @@ macOS will ask for **Camera** access, and you must grant **Accessibility**
 moved. Without it, macOS silently ignores synthetic input and reports no error —
 the app detects this and shows a blocking banner rather than appearing to work.
 
+## Shelf demo (browser only, no Electron, no native addon)
+
+```bash
+npm run dev:shelf-demo
+```
+
+Renders a simulated store shelf as twelve product zones, runs MediaPipe in the
+browser, fits a gaze→screen model after a short calibration, and accumulates a
+per-zone dwell heatmap. Nothing is persisted and no frames leave the tab. There's
+a replay mode that fakes a gaze walk when no camera is available.
+
+The gaze model here is deliberately **not** the validated Rust pipeline — it's a
+ridge-regularized affine fit plus a One Euro filter, good enough to demonstrate
+zone-level attention and no more.
+
+This package was the origin of the gaze sensor in
+[cognitum-one/cognitum-pulse](https://github.com/cognitum-one/cognitum-pulse),
+which ports the browser loop with the landmark math inlined and joins per-item
+attention to point-of-sale data. The port is a **copy, not a dependency** — that
+repo takes nothing from this monorepo, so the two can diverge freely.
+See [docs/plan/04-cognitum-pulse-integration.md](docs/plan/04-cognitum-pulse-integration.md).
+
 ## Try it without a camera
 
 ```bash
@@ -127,11 +149,12 @@ Three decisions carry most of the weight:
 ## Layout
 
 ```
-docs/adrs/        20 architecture decision records — the "why"
-docs/plan/        milestones, risk register, tuning playbook, status
-packages/native/  Rust: eye-tracker-core (pure, tested) + napi bindings
-packages/core/    Shared TS: landmark constants, feature extraction, frame layout
-packages/app/     Electron: main / preload / control renderer / overlay renderer
+docs/adrs/            20 architecture decision records — the "why"
+docs/plan/            milestones, risk register, tuning playbook, status
+packages/native/      Rust: eye-tracker-core (pure, tested) + napi bindings
+packages/core/        Shared TS: landmark constants, feature extraction, frame layout
+packages/app/         Electron: main / preload / control renderer / overlay renderer
+packages/shelf-demo/  Browser-only demo: gaze heatmap over a simulated store shelf
 ```
 
 The Rust side is deliberately two crates. `eye-tracker-core` has no Node
